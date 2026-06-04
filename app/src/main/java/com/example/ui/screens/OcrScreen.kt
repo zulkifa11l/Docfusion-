@@ -30,6 +30,8 @@ import androidx.compose.ui.unit.sp
 import com.example.ui.viewmodel.DocFusionViewModel
 import com.example.util.DocxProcessor
 import com.example.util.PdfProcessor
+import com.example.util.getFileFromUri
+import com.example.util.resolveFileName
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)

@@ -20,6 +20,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
 import com.example.data.*
 import com.example.util.*
+import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -56,6 +57,16 @@ class DocFusionViewModel(application: Application) : AndroidViewModel(applicatio
     // App Lock PIN Verification state
     var isAppLocked by mutableStateOf(false)
         private set
+
+    // Global Dark Theme state
+    var isDarkMode by mutableStateOf(settingsManager.isDarkModeEnabled)
+        private set
+
+    fun toggleDarkMode() {
+        val newValue = !isDarkMode
+        settingsManager.isDarkModeEnabled = newValue
+        isDarkMode = newValue
+    }
 
     // Temporary active operation states
     var isConverting by mutableStateOf(false)
@@ -116,9 +127,48 @@ class DocFusionViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /**
+     * Renames a history entry physically on disk and updates its DB path and name.
+     */
+    fun renameFile(entry: HistoryEntry, newName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val oldFile = File(entry.path)
+                if (!oldFile.exists()) return@launch
+                
+                val extension = oldFile.extension
+                val baseRenameAndExt = if (newName.endsWith(".$extension", ignoreCase = true)) newName else "$newName.$extension"
+                val newFile = File(oldFile.parentFile, baseRenameAndExt)
+                
+                if (oldFile.renameTo(newFile)) {
+                    val updated = entry.copy(
+                        name = baseRenameAndExt,
+                        path = newFile.absolutePath,
+                        timestamp = System.currentTimeMillis() // Touch timestamp to appear in recent
+                    )
+                    repository.insertHistoryEntry(updated)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to rename file", e)
+            }
+        }
+    }
+
     fun toggleFavorite(entry: HistoryEntry) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.setFavStatus(entry.id, !entry.isFavorite)
+        }
+    }
+
+    fun updateHistoryTags(id: Long, tags: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.updateHistoryTags(id, tags)
+        }
+    }
+
+    fun updateNoteTags(id: Long, tags: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.updateNoteTags(id, tags)
         }
     }
 
@@ -230,6 +280,77 @@ class DocFusionViewModel(application: Application) : AndroidViewModel(applicatio
                 withContext(Dispatchers.Main) { onComplete() }
             } catch (e: Exception) {
                 Log.e(TAG, "Custom image converting error", e)
+            } finally {
+                isConverting = false
+            }
+        }
+    }
+
+    /**
+     * Converts multiple image files into a single custom PDF format
+     */
+    fun convertMultipleImagesToCustomPdf(files: List<File>, options: PdfProcessor.PdfOptions, onComplete: () -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            isConverting = true
+            conversionMsg = "Resizing and converting multiple images to PDF..."
+            try {
+                val pdfName = "Images_compiled_${java.lang.System.currentTimeMillis() / 1000}.pdf"
+                val outFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), pdfName)
+                PdfProcessor.imagesToPdf(context, files, outFile, options)
+
+                repository.insertHistoryEntry(
+                    HistoryEntry(
+                        name = pdfName,
+                        path = outFile.absolutePath,
+                        category = "PDF",
+                        timestamp = java.lang.System.currentTimeMillis(),
+                        fileSize = outFile.length()
+                    )
+                )
+                withContext(Dispatchers.Main) { onComplete() }
+            } catch (e: Exception) {
+                Log.e(TAG, "Custom multiple images converting error", e)
+            } finally {
+                isConverting = false
+            }
+        }
+    }
+
+    /**
+     * Converts selected stored image history entries into a single compiled PDF file
+     */
+    fun convertStoredImagesToPdf(entries: List<HistoryEntry>, pdfName: String, options: PdfProcessor.PdfOptions, onComplete: (File) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            isConverting = true
+            conversionMsg = "Compiling stored images into PDF..."
+            try {
+                val basePdfName = if (pdfName.endsWith(".pdf", ignoreCase = true)) pdfName else "$pdfName.pdf"
+                val outFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), basePdfName)
+                
+                val imageFiles = entries.map { File(it.path) }.filter { it.exists() }
+                if (imageFiles.isEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "No physical stored images found.", Toast.LENGTH_SHORT).show()
+                    }
+                    return@launch
+                }
+                
+                PdfProcessor.imagesToPdf(context, imageFiles, outFile, options)
+                
+                val newEntry = HistoryEntry(
+                    name = basePdfName,
+                    path = outFile.absolutePath,
+                    category = "PDF",
+                    timestamp = System.currentTimeMillis(),
+                    fileSize = outFile.length()
+                )
+                repository.insertHistoryEntry(newEntry)
+                
+                withContext(Dispatchers.Main) {
+                    onComplete(outFile)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "convertStoredImagesToPdf crash", e)
             } finally {
                 isConverting = false
             }
@@ -422,8 +543,33 @@ class DocFusionViewModel(application: Application) : AndroidViewModel(applicatio
                         sigBmp.recycle()
                     }
                     "PDF Split" -> {
-                        // Splits pages based on indices
-                        PdfProcessor.splitPdf(pdfFile, outFile, intArrayOf(0)) // Split first page by default
+                        var pageCount = 0
+                        try {
+                            val fd = android.os.ParcelFileDescriptor.open(pdfFile, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
+                            val renderer = android.graphics.pdf.PdfRenderer(fd)
+                            pageCount = renderer.pageCount
+                            renderer.close()
+                            fd.close()
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                        
+                        if (pageCount > 1) {
+                            for (i in 0 until pageCount) {
+                                val splitOutName = "${pdfFile.nameWithoutExtension}_page_${i + 1}.pdf"
+                                val splitOutFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), splitOutName)
+                                PdfProcessor.splitPdf(pdfFile, splitOutFile, intArrayOf(i))
+                                repository.insertHistoryEntry(HistoryEntry(
+                                    name = splitOutName, path = splitOutFile.absolutePath, category = "PDF",
+                                    timestamp = System.currentTimeMillis() + i * 10,
+                                    fileSize = splitOutFile.length()
+                                ))
+                            }
+                            // Also write page 1 to normal output target file
+                            PdfProcessor.splitPdf(pdfFile, outFile, intArrayOf(0))
+                        } else {
+                            PdfProcessor.splitPdf(pdfFile, outFile, intArrayOf(0))
+                        }
                     }
                     "Rotate Pages" -> {
                         PdfProcessor.rotatePages(pdfFile, outFile, 90f)
@@ -565,18 +711,33 @@ class DocFusionViewModel(application: Application) : AndroidViewModel(applicatio
 
     // --- Notes and Voice Notes Persistence Operations ---
 
-    fun saveNote(title: String, content: String, isSecured: Boolean = false, audioFile: File? = null) {
+    fun saveNote(
+        id: Long = 0,
+        title: String,
+        content: String,
+        isSecured: Boolean = false,
+        audioFile: File? = null,
+        audioPath: String? = null,
+        durationSeconds: Int = 0,
+        tags: String = "",
+        onComplete: ((Long) -> Unit)? = null
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
-            val audioPath = audioFile?.absolutePath
+            val finalAudioPath = audioFile?.absolutePath ?: audioPath
             val newNote = Note(
+                id = id,
                 title = title.ifEmpty { "New Note" },
                 content = content,
                 timestamp = System.currentTimeMillis(),
-                audioPath = audioPath,
-                durationSeconds = if (audioFile != null) 30 else 0, // simple mock durations
-                isSecure = isSecured
+                audioPath = finalAudioPath,
+                durationSeconds = if (audioFile != null) 30 else durationSeconds,
+                isSecure = isSecured,
+                tags = tags
             )
-            repository.insertNote(newNote)
+            val generatedId = repository.insertNote(newNote)
+            withContext(Dispatchers.Main) {
+                onComplete?.invoke(generatedId)
+            }
         }
     }
 
@@ -679,6 +840,75 @@ class DocFusionViewModel(application: Application) : AndroidViewModel(applicatio
             currentAudioPlayingPath = null
         } catch (e: Exception) {
             Log.e(TAG, "Failed releasing player", e)
+        }
+    }
+
+    fun backupData(displayName: String, onResult: (android.net.Uri?) -> Unit) {
+        viewModelScope.launch {
+            val historyList = withContext(Dispatchers.IO) { repository.getAllHistoryList() }
+            val noteList = withContext(Dispatchers.IO) { repository.getAllNotesList() }
+            val uri = withContext(Dispatchers.IO) {
+                BackupRestoreManager.exportBackup(context, historyList, noteList, displayName)
+            }
+            onResult(uri)
+        }
+    }
+
+    fun restoreData(uri: android.net.Uri, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val success = withContext(Dispatchers.IO) {
+                BackupRestoreManager.importBackup(context, uri, repository)
+            }
+            onResult(success)
+        }
+    }
+
+    /**
+     * Reorders PDF pages based on a list of 1-based index numbers and saves the output.
+     */
+    fun performPdfPageReorder(pdfFile: File, customOrder: List<Int>, onComplete: () -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            isConverting = true
+            conversionMsg = "Reordering and compiling PDF pages..."
+            try {
+                val outName = "${pdfFile.nameWithoutExtension}_reordered.pdf"
+                val outFile = File(context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS), outName)
+                
+                PdfProcessor.reorderPages(pdfFile, outFile, customOrder)
+                
+                repository.insertHistoryEntry(
+                    HistoryEntry(
+                        name = outName,
+                        path = outFile.absolutePath,
+                        category = "PDF",
+                        timestamp = System.currentTimeMillis(),
+                        fileSize = outFile.length()
+                    )
+                )
+                withContext(Dispatchers.Main) { onComplete() }
+            } catch (e: Exception) {
+                Log.e(TAG, "PDF page reordering error", e)
+            } finally {
+                isConverting = false
+            }
+        }
+    }
+
+    fun insertManualHistoryEntry(name: String, absolutePath: String, category: String, size: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                repository.insertHistoryEntry(
+                    HistoryEntry(
+                        name = name,
+                        path = absolutePath,
+                        category = category,
+                        timestamp = System.currentTimeMillis(),
+                        fileSize = size
+                    )
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to insert manual history entry", e)
+            }
         }
     }
 

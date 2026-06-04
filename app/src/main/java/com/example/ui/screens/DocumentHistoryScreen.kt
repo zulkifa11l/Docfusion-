@@ -51,6 +51,18 @@ fun DocumentHistoryScreen(
     var activeCategory by remember { mutableStateOf(initialCategory) }
     var searchQuery by remember { mutableStateOf("") }
     
+    var showRenameDialog by remember { mutableStateOf<HistoryEntry?>(null) }
+    var renameInputText by remember { mutableStateOf("") }
+
+    var showSaveAsDialog by remember { mutableStateOf<HistoryEntry?>(null) }
+    var saveAsInputText by remember { mutableStateOf("") }
+    var exportWithPassword by remember { mutableStateOf(false) }
+    var exportPasswordText by remember { mutableStateOf("") }
+
+    var showEditTagsDialog by remember { mutableStateOf<HistoryEntry?>(null) }
+    var tagsInputText by remember { mutableStateOf("") }
+    var selectedFilterTag by remember { mutableStateOf<String?>(null) }
+
     // Multi-Selection State
     var isSelectMode by remember { mutableStateOf(false) }
     val selectedEntries = remember { mutableStateListOf<HistoryEntry>() }
@@ -62,7 +74,7 @@ fun DocumentHistoryScreen(
     var pinErrorMsg by remember { mutableStateOf("") }
 
     // List of active files matching selection
-    val displayedFiles = remember(historyList, favoritesList, secureList, activeCategory, searchQuery) {
+    val displayedFiles = remember(historyList, favoritesList, secureList, activeCategory, searchQuery, selectedFilterTag) {
         val baseList = when (activeCategory) {
             "Secure" -> if (isSecureVaultUnlocked) secureList else emptyList()
             "Favorite" -> favoritesList
@@ -70,7 +82,9 @@ fun DocumentHistoryScreen(
             else -> historyList.filter { !it.isSecure && it.category == activeCategory }
         }
         baseList.filter {
-            searchQuery.isEmpty() || it.name.contains(searchQuery, ignoreCase = true)
+            val matchesSearch = searchQuery.isEmpty() || it.name.contains(searchQuery, ignoreCase = true)
+            val matchesTag = selectedFilterTag == null || it.tags?.split(",")?.map { t -> t.trim() }?.contains(selectedFilterTag) == true
+            matchesSearch && matchesTag
         }
     }
 
@@ -139,6 +153,21 @@ fun DocumentHistoryScreen(
                 actions = {
                     if (isSelectMode) {
                         // Action buttons for Multi-Select
+                        val areAllPdfs = selectedEntries.isNotEmpty() && selectedEntries.all { it.category == "PDF" }
+                        if (areAllPdfs && selectedEntries.size > 1) {
+                            IconButton(onClick = {
+                                val filesList = selectedEntries.map { File(it.path) }.filter { it.exists() }
+                                if (filesList.isNotEmpty()) {
+                                    viewModel.performPostPdfMerge(filesList) {
+                                        Toast.makeText(context, "Successfully merged selected PDFs!", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                isSelectMode = false
+                                selectedEntries.clear()
+                            }) {
+                                Icon(Icons.Default.MergeType, contentDescription = "Merge selected PDFs")
+                            }
+                        }
                         IconButton(onClick = {
                             selectedEntries.forEach { viewModel.toggleFavorite(it) }
                             isSelectMode = false
@@ -230,6 +259,64 @@ fun DocumentHistoryScreen(
                 }
             }
 
+            // Scrollable Tags Row to Filter Documents
+            val allAvailableTags = remember(historyList, favoritesList, secureList) {
+                val tags = mutableSetOf<String>()
+                (historyList + favoritesList + secureList).forEach { entry ->
+                    entry.tags?.split(",")?.forEach {
+                        val trimmed = it.trim()
+                        if (trimmed.isNotEmpty()) {
+                            tags.add(trimmed)
+                        }
+                    }
+                }
+                tags.toList().sorted()
+            }
+
+            if (allAvailableTags.isNotEmpty()) {
+                androidx.compose.foundation.lazy.LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp)
+                ) {
+                    item {
+                        val isSelected = selectedFilterTag == null
+                        val containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(0.40f)
+                        val contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                        
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(containerColor)
+                                .clickable { selectedFilterTag = null }
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text("All Labels", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = contentColor)
+                        }
+                    }
+                    
+                    items(allAvailableTags) { tag ->
+                        val isSelected = selectedFilterTag == tag
+                        val containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(0.40f)
+                        val contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                        
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(containerColor)
+                                .clickable {
+                                    selectedFilterTag = if (selectedFilterTag == tag) null else tag
+                                }
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text(tag, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = contentColor)
+                        }
+                    }
+                }
+            }
+
             // Results List
             if (displayedFiles.isEmpty()) {
                 Box(
@@ -270,7 +357,6 @@ fun DocumentHistoryScreen(
                                     if (isSelected) selectedEntries.remove(entry) else selectedEntries.add(entry)
                                     if (selectedEntries.isEmpty()) isSelectMode = false
                                 } else {
-                                    // Open options modal sheet or share file directly!
                                     shareDocFile(context, entry)
                                 }
                             },
@@ -282,11 +368,188 @@ fun DocumentHistoryScreen(
                             onSecurityToggle = {
                                 val pin = viewModel.settingsManager.appLockPin ?: "1234"
                                 viewModel.toggleFileSecurity(entry, pin)
+                            },
+                            onRename = {
+                                renameInputText = entry.name
+                                showRenameDialog = entry
+                            },
+                            onDelete = {
+                                viewModel.deleteFile(entry)
+                                Toast.makeText(context, "${entry.name} deleted.", Toast.LENGTH_SHORT).show()
+                            },
+                            onSaveAs = {
+                                saveAsInputText = entry.name
+                                exportWithPassword = false
+                                exportPasswordText = ""
+                                showSaveAsDialog = entry
+                            },
+                            onEditTags = {
+                                tagsInputText = entry.tags ?: ""
+                                showEditTagsDialog = entry
                             }
                         )
                     }
                 }
             }
+        }
+
+        // Rename Dialog
+        if (showRenameDialog != null) {
+            val entry = showRenameDialog!!
+            AlertDialog(
+                onDismissRequest = { showRenameDialog = null },
+                title = { Text("Rename File", fontWeight = FontWeight.Bold) },
+                text = {
+                    Column {
+                        Text("Enter new name for the file:", style = MaterialTheme.typography.bodySmall)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = renameInputText,
+                            onValueChange = { renameInputText = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            singleLine = true
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        if (renameInputText.isNotBlank()) {
+                            viewModel.renameFile(entry, renameInputText.trim())
+                            showRenameDialog = null
+                        }
+                    }) {
+                        Text("Rename")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showRenameDialog = null }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+
+        // Save As / Export Dialog
+        if (showSaveAsDialog != null) {
+            val entry = showSaveAsDialog!!
+            val isPdf = entry.category == "PDF" || entry.name.endsWith(".pdf", ignoreCase = true) || saveAsInputText.endsWith(".pdf", ignoreCase = true)
+            
+            AlertDialog(
+                onDismissRequest = { showSaveAsDialog = null },
+                title = { Text("Save As & Export", fontWeight = FontWeight.Bold) },
+                text = {
+                    Column {
+                        Text("Specify name for the exported document:", style = MaterialTheme.typography.bodySmall)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = saveAsInputText,
+                            onValueChange = { saveAsInputText = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            singleLine = true
+                        )
+                        
+                        if (isPdf) {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { exportWithPassword = !exportWithPassword }
+                            ) {
+                                Checkbox(
+                                    checked = exportWithPassword,
+                                    onCheckedChange = { exportWithPassword = it }
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("Encrypt PDF with Password", fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                            }
+                            
+                            if (exportWithPassword) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = exportPasswordText,
+                                    onValueChange = { exportPasswordText = it },
+                                    placeholder = { Text("Enter encryption password...") },
+                                    label = { Text("Document Encryption Password") },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    shape = RoundedCornerShape(12.dp),
+                                    singleLine = true
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Note: Remember this password! To open/unlock the PDF, use our Advanced PDF Unlock option.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                        
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "This file will be compiled and exported directly to public Downloads/Docfusion folder.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                confirmButton = {
+                    val isConfirmEnabled = !exportWithPassword || exportPasswordText.isNotBlank()
+                    Button(
+                        onClick = {
+                            if (saveAsInputText.isNotBlank()) {
+                                val trimmedName = saveAsInputText.trim()
+                                val originalFile = File(entry.path)
+                                if (originalFile.exists()) {
+                                    val uri = if (isPdf && exportWithPassword && exportPasswordText.isNotBlank()) {
+                                        try {
+                                            val tempEncrypted = File(context.cacheDir, "encrypted_export_${System.currentTimeMillis()}.pdf")
+                                            com.example.util.PdfProcessor.encryptDecryptFile(
+                                                context,
+                                                originalFile,
+                                                tempEncrypted,
+                                                exportPasswordText.trim(),
+                                                true
+                                            )
+                                            val resultUri = com.example.util.exportFileToDownloads(context, tempEncrypted, trimmedName)
+                                            tempEncrypted.delete()
+                                            resultUri
+                                        } catch (e: Exception) {
+                                            e.printStackTrace()
+                                            null
+                                        }
+                                    } else {
+                                        com.example.util.exportFileToDownloads(context, originalFile, trimmedName)
+                                    }
+                                    
+                                    if (uri != null) {
+                                        if (isPdf && exportWithPassword && exportPasswordText.isNotBlank()) {
+                                            Toast.makeText(context, "Password encrypted PDF saved to Downloads/Docfusion !", Toast.LENGTH_LONG).show()
+                                        } else {
+                                            Toast.makeText(context, "Exported successfully to Downloads/Docfusion !", Toast.LENGTH_LONG).show()
+                                        }
+                                    } else {
+                                        Toast.makeText(context, "Failed to copy file to storage.", Toast.LENGTH_SHORT).show()
+                                    }
+                                } else {
+                                    Toast.makeText(context, "Original resource file not found in cache.", Toast.LENGTH_SHORT).show()
+                                }
+                                showSaveAsDialog = null
+                            }
+                        },
+                        enabled = isConfirmEnabled
+                    ) {
+                        Text("Export")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showSaveAsDialog = null }) {
+                        Text("Cancel")
+                    }
+                }
+            )
         }
 
         // Secure PIN Verification Dialog
@@ -338,6 +601,65 @@ fun DocumentHistoryScreen(
                 }
             )
         }
+
+        // Edit Document Tags Dialog
+        if (showEditTagsDialog != null) {
+            val entry = showEditTagsDialog!!
+            AlertDialog(
+                onDismissRequest = { showEditTagsDialog = null },
+                title = { Text("Edit Document Tags", fontWeight = FontWeight.Bold) },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("Assign custom tags to organize your files (use commas to separate multiple labels):", style = MaterialTheme.typography.bodySmall)
+                        
+                        OutlinedTextField(
+                            value = tagsInputText,
+                            onValueChange = { tagsInputText = it },
+                            placeholder = { Text("Work, Reference, Invoice, Receipt") },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            singleLine = true
+                        )
+
+                        Text("Quick Presets:", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            val quickPresets = listOf("Work", "Invoice", "Receipt", "Urgent")
+                            quickPresets.forEach { pre ->
+                                val curSelected = tagsInputText.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                                val active = curSelected.contains(pre)
+                                FilterChip(
+                                    selected = active,
+                                    onClick = {
+                                        if (active) {
+                                            tagsInputText = curSelected.filter { it != pre }.joinToString(", ")
+                                        } else {
+                                            tagsInputText = if (tagsInputText.isBlank()) pre else "$tagsInputText, $pre"
+                                        }
+                                    },
+                                    label = { Text(pre) }
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        viewModel.updateHistoryTags(entry.id, tagsInputText.trim())
+                        showEditTagsDialog = null
+                    }) {
+                        Text("Save Tags")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showEditTagsDialog = null }) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -350,7 +672,11 @@ fun HistoryEntryCard(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onFavoriteToggle: () -> Unit,
-    onSecurityToggle: () -> Unit
+    onSecurityToggle: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+    onSaveAs: () -> Unit,
+    onEditTags: () -> Unit
 ) {
     val sdf = remember { SimpleDateFormat("MMMd, yyyy h:mm a", Locale.getDefault()) }
     val formattedDate = remember(entry.timestamp) { sdf.format(Date(entry.timestamp)) }
@@ -358,6 +684,8 @@ fun HistoryEntryCard(
         val kb = entry.fileSize / 1024
         if (kb > 1024) String.format(Locale.US, "%.1f MB", kb / 1024f) else "$kb KB"
     }
+
+    var showMenu by remember { mutableStateOf(false) }
 
     val icon = when (entry.category) {
         "PDF" -> Icons.Default.PictureAsPdf
@@ -423,10 +751,44 @@ fun HistoryEntryCard(
                     Text("•", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(0.40f))
                     Text(formattedSize, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(0.80f))
                 }
+
+                // Render File Tags row below the metadata details
+                val entryTagsList = remember(entry.tags) {
+                    entry.tags?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
+                }
+                if (entryTagsList.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        entryTagsList.take(3).forEach { tag ->
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = tag,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        if (entryTagsList.size > 3) {
+                            Text("+${entryTagsList.size - 3}", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
             }
 
             if (!isSelectMode) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     IconButton(onClick = onFavoriteToggle) {
                         Icon(
                             imageVector = if (entry.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
@@ -435,12 +797,67 @@ fun HistoryEntryCard(
                         )
                     }
 
-                    IconButton(onClick = onSecurityToggle) {
-                        Icon(
-                            imageVector = if (entry.isSecure) Icons.Default.LockOpen else Icons.Default.Lock,
-                            contentDescription = "Security Vault",
-                            tint = if (entry.isSecure) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    Box {
+                        IconButton(onClick = { showMenu = true }) {
+                            Icon(
+                                imageVector = Icons.Default.MoreVert,
+                                contentDescription = "More options",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showMenu,
+                            onDismissRequest = { showMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Open / Share") },
+                                leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    onClick()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Edit Labels/Tags") },
+                                leadingIcon = { Icon(Icons.Default.Label, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    onEditTags()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Save As (Export)") },
+                                leadingIcon = { Icon(Icons.Default.SaveAlt, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    onSaveAs()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Vault Secure Toggle") },
+                                leadingIcon = { Icon(if (entry.isSecure) Icons.Default.LockOpen else Icons.Default.Lock, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    onSecurityToggle()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Rename File") },
+                                leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                                onClick = {
+                                    showMenu = false
+                                    onRename()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Delete File") },
+                                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                                onClick = {
+                                    showMenu = false
+                                    onDelete()
+                                }
+                            )
+                        }
                     }
                 }
             }

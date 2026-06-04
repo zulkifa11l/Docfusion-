@@ -12,7 +12,8 @@ data class HistoryEntry(
     val timestamp: Long,
     val fileSize: Long,
     val isFavorite: Boolean = false,
-    val isSecure: Boolean = false
+    val isSecure: Boolean = false,
+    val tags: String? = ""
 )
 
 @Entity(tableName = "notes")
@@ -23,5 +24,6 @@ data class Note(
     val timestamp: Long,
     val audioPath: String? = null, // Path to recording if voice note
     val durationSeconds: Int = 0,
-    val isSecure: Boolean = false
+    val isSecure: Boolean = false,
+    val tags: String? = ""
 )

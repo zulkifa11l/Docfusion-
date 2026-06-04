@@ -29,6 +29,12 @@ interface HistoryDao {
 
     @Query("DELETE FROM history_entries WHERE path = :path")
     suspend fun deleteByPath(path: String)
+
+    @Query("UPDATE history_entries SET tags = :tags WHERE id = :id")
+    suspend fun updateHistoryTags(id: Long, tags: String?)
+
+    @Query("SELECT * FROM history_entries")
+    suspend fun getAllHistoryList(): List<HistoryEntry>
 }
 
 @Dao
@@ -39,14 +45,20 @@ interface NoteDao {
     @Query("SELECT * FROM notes WHERE id = :id")
     suspend fun getNoteById(id: Long): Note?
 
+    @Query("SELECT * FROM notes")
+    suspend fun getAllNotesList(): List<Note>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertNote(note: Note): Long
+
+    @Query("UPDATE notes SET tags = :tags WHERE id = :id")
+    suspend fun updateNoteTags(id: Long, tags: String?)
 
     @Delete
     suspend fun deleteNote(note: Note)
 }
 
-@Database(entities = [HistoryEntry::class, Note::class], version = 1, exportSchema = false)
+@Database(entities = [HistoryEntry::class, Note::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun historyDao(): HistoryDao
     abstract fun noteDao(): NoteDao

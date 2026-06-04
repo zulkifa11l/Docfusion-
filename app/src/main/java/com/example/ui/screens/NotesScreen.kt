@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.Note
 import com.example.ui.viewmodel.DocFusionViewModel
+import kotlinx.coroutines.delay
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -54,8 +55,61 @@ fun NotesScreen(
     var showAddNoteDialog by remember { mutableStateOf(false) }
     var noteTitleInput by remember { mutableStateOf("") }
     var noteContentInput by remember { mutableStateOf("") }
+    var noteTagsInput by remember { mutableStateOf("") }
     var recordedVoiceFile by remember { mutableStateOf<File?>(null) }
     var securedNoteToggle by remember { mutableStateOf(false) }
+
+    // Editing State Cache values
+    var editingNoteId by remember { mutableLongStateOf(0L) }
+    var editingNoteAudioPath by remember { mutableStateOf<String?>(null) }
+    var editingNoteDuration by remember { mutableIntStateOf(0) }
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedFilterTag by remember { mutableStateOf<String?>(null) }
+
+    val filteredNotes = remember(activeNotes, searchQuery, selectedFilterTag) {
+        val baseFiltered = if (searchQuery.isBlank()) {
+            activeNotes
+        } else {
+            activeNotes.filter { note ->
+                note.title.contains(searchQuery, ignoreCase = true) ||
+                note.content.contains(searchQuery, ignoreCase = true)
+            }
+        }
+        if (selectedFilterTag == null) {
+            baseFiltered
+        } else {
+            baseFiltered.filter { note ->
+                note.tags?.split(",")?.map { it.trim() }?.contains(selectedFilterTag) == true
+            }
+        }
+    }
+
+    // Live Auto-Save when typing inside notes creator
+    LaunchedEffect(noteTitleInput, noteContentInput, noteTagsInput, securedNoteToggle) {
+        if (showAddNoteDialog) {
+            val titleText = noteTitleInput
+            val contentText = noteContentInput
+            val tagsText = noteTagsInput
+            // Auto-save only if we have at least structured inputs typing
+            if (titleText.isNotEmpty() || contentText.isNotEmpty()) {
+                delay(1200) // Debounce typing changes
+                viewModel.saveNote(
+                    id = editingNoteId,
+                    title = titleText,
+                    content = contentText,
+                    isSecured = securedNoteToggle,
+                    audioFile = recordedVoiceFile,
+                    audioPath = editingNoteAudioPath,
+                    durationSeconds = editingNoteDuration,
+                    tags = tagsText
+                ) { generatedId ->
+                    if (editingNoteId == 0L) {
+                        editingNoteId = generatedId
+                    }
+                }
+            }
+        }
+    }
 
     val sdf = remember { SimpleDateFormat("MMMM d, YYYY • h:mm a", Locale.getDefault()) }
 
@@ -101,8 +155,15 @@ fun NotesScreen(
         floatingActionButton = {
             FloatingActionButton(
                 onClick = {
-                    showAddNoteDialog = true
+                    editingNoteId = 0L
+                    noteTitleInput = ""
+                    noteContentInput = ""
+                    noteTagsInput = ""
+                    recordedVoiceFile = null
+                    editingNoteAudioPath = null
+                    editingNoteDuration = 0
                     securedNoteToggle = isSecureView
+                    showAddNoteDialog = true
                 },
                 shape = CircleShape,
                 containerColor = MaterialTheme.colorScheme.primary
@@ -117,7 +178,77 @@ fun NotesScreen(
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp)
         ) {
-            if (activeNotes.isEmpty()) {
+            // Modern Search Bar
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                placeholder = { Text("Search title, audio memos or details...") },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                shape = RoundedCornerShape(24.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp)
+            )
+
+            // Scrollable Note Tags Filter Bar
+            val allUniqueNoteTags = remember(activeNotes) {
+                val tags = mutableSetOf<String>()
+                activeNotes.forEach { note ->
+                    note.tags?.split(",")?.forEach {
+                        val trimmed = it.trim()
+                        if (trimmed.isNotEmpty()) {
+                            tags.add(trimmed)
+                        }
+                    }
+                }
+                tags.toList().sorted()
+            }
+
+            if (allUniqueNoteTags.isNotEmpty()) {
+                androidx.compose.foundation.lazy.LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp)
+                ) {
+                    item {
+                        val isSelected = selectedFilterTag == null
+                        val containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(0.40f)
+                        val contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                        
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(containerColor)
+                                .clickable { selectedFilterTag = null }
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text("All Memos", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = contentColor)
+                        }
+                    }
+                    
+                    items(allUniqueNoteTags) { tag ->
+                        val isSelected = selectedFilterTag == tag
+                        val containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(0.40f)
+                        val contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                        
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(containerColor)
+                                .clickable {
+                                    selectedFilterTag = if (selectedFilterTag == tag) null else tag
+                                }
+                                .padding(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text(tag, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = contentColor)
+                        }
+                    }
+                }
+            }
+
+            if (filteredNotes.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -132,7 +263,10 @@ fun NotesScreen(
                             modifier = Modifier.size(54.dp)
                         )
                         Spacer(modifier = Modifier.height(12.dp))
-                        Text("No notes found in ${if (isSecureView) "Secure" else "Public"}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            text = if (searchQuery.isNotEmpty()) "No matching notes found" else "No notes found in ${if (isSecureView) "Secure" else "Public"}",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         Text("Tap + to create text or voice memos.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(0.7f))
                     }
                 }
@@ -142,9 +276,21 @@ fun NotesScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     contentPadding = PaddingValues(vertical = 8.dp)
                 ) {
-                    items(activeNotes) { note ->
+                    items(filteredNotes) { note ->
                         Card(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    editingNoteId = note.id
+                                    noteTitleInput = note.title
+                                    noteContentInput = note.content
+                                    noteTagsInput = note.tags ?: ""
+                                    securedNoteToggle = note.isSecure
+                                    editingNoteAudioPath = note.audioPath
+                                    editingNoteDuration = note.durationSeconds
+                                    recordedVoiceFile = null
+                                    showAddNoteDialog = true
+                                },
                             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                             shape = RoundedCornerShape(16.dp),
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
@@ -172,6 +318,28 @@ fun NotesScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(bottom = 8.dp)
                                 )
+
+                                // Render Note tags
+                                val noteTagsList = remember(note.tags) {
+                                    note.tags?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
+                                }
+                                if (noteTagsList.isNotEmpty()) {
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        modifier = Modifier.padding(bottom = 8.dp)
+                                    ) {
+                                        noteTagsList.forEach { tag ->
+                                            Box(
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(6.dp))
+                                                    .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f))
+                                                    .padding(horizontal = 8.dp, vertical = 2.dp)
+                                            ) {
+                                                Text(tag, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                                            }
+                                        }
+                                    }
+                                }
 
                                 // Real voice player attachment
                                 note.audioPath?.let { audio ->
@@ -225,10 +393,14 @@ fun NotesScreen(
                     if (viewModel.isRecordingAudio) viewModel.stopVoiceRecording()
                     showAddNoteDialog = false
                     recordedVoiceFile = null
+                    editingNoteId = 0L
+                    editingNoteAudioPath = null
+                    editingNoteDuration = 0
                     noteTitleInput = ""
                     noteContentInput = ""
+                    noteTagsInput = ""
                 },
-                title = { Text(text = "Add Text / Voice Memo", fontWeight = FontWeight.Bold) },
+                title = { Text(text = if (editingNoteId != 0L) "Edit Text / Voice Memo" else "Add Text / Voice Memo", fontWeight = FontWeight.Bold) },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         OutlinedTextField(
@@ -247,6 +419,39 @@ fun NotesScreen(
                                 .fillMaxWidth()
                                 .height(100.dp)
                         )
+
+                        // Tags Editor
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            OutlinedTextField(
+                                value = noteTagsInput,
+                                onValueChange = { noteTagsInput = it },
+                                placeholder = { Text("Work, Personal, Ideas, Urgent") },
+                                label = { Text("Note Labels (comma-separated)") },
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                val popularTags = listOf("Work", "Personal", "Ideas", "Urgent")
+                                popularTags.forEach { t ->
+                                    val curTags = noteTagsInput.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                                    val active = curTags.contains(t)
+                                    FilterChip(
+                                        selected = active,
+                                        onClick = {
+                                            if (active) {
+                                                noteTagsInput = curTags.filter { it != t }.joinToString(", ")
+                                            } else {
+                                                noteTagsInput = if (noteTagsInput.isBlank()) t else "$noteTagsInput, $t"
+                                            }
+                                        },
+                                        label = { Text(t, fontSize = 10.sp) }
+                                    )
+                                }
+                            }
+                        }
 
                         // Microphone Recorder layout
                         Box(
@@ -293,7 +498,7 @@ fun NotesScreen(
                                         fontSize = 13.sp
                                     )
                                     Text(
-                                        text = if (recordedVoiceFile != null) "Recording saved!" else "Tap mic to capture voice notes",
+                                        text = if (recordedVoiceFile != null || editingNoteAudioPath != null) "Recording saved!" else "Tap mic to capture voice notes",
                                         fontSize = 11.sp,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -321,15 +526,23 @@ fun NotesScreen(
                             return@Button
                         }
                         viewModel.saveNote(
+                            id = editingNoteId,
                             title = noteTitleInput,
                             content = noteContentInput,
                             isSecured = securedNoteToggle,
-                            audioFile = recordedVoiceFile
+                            audioFile = recordedVoiceFile,
+                            audioPath = editingNoteAudioPath,
+                            durationSeconds = editingNoteDuration,
+                            tags = noteTagsInput
                         )
                         showAddNoteDialog = false
                         recordedVoiceFile = null
+                        editingNoteId = 0L
+                        editingNoteAudioPath = null
+                        editingNoteDuration = 0
                         noteTitleInput = ""
                         noteContentInput = ""
+                        noteTagsInput = ""
                         Toast.makeText(context, "Memo successfully saved!", Toast.LENGTH_SHORT).show()
                     }) {
                         Text("Save Notes")
@@ -340,8 +553,12 @@ fun NotesScreen(
                         if (viewModel.isRecordingAudio) viewModel.stopVoiceRecording()
                         showAddNoteDialog = false
                         recordedVoiceFile = null
+                        editingNoteId = 0L
+                        editingNoteAudioPath = null
+                        editingNoteDuration = 0
                         noteTitleInput = ""
                         noteContentInput = ""
+                        noteTagsInput = ""
                     }) {
                         Text("Cancel")
                     }

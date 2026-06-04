@@ -23,7 +23,7 @@ class MainActivity : ComponentActivity() {
         
         setContent {
             val viewModel: DocFusionViewModel = viewModel()
-            val isDarkThemeEnabled = viewModel.settingsManager.isDarkModeEnabled
+            val isDarkThemeEnabled = viewModel.isDarkMode
 
             MyApplicationTheme(darkTheme = isDarkThemeEnabled) {
                 Surface(
@@ -60,7 +60,8 @@ class MainActivity : ComponentActivity() {
                                 onNavigateToPdfTools = { navController.navigate("pdftools") },
                                 onNavigateToOcr = { navController.navigate("ocr") },
                                 onNavigateToHistory = { category -> navController.navigate("history/$category") },
-                                onNavigateToNotes = { navController.navigate("notes") }
+                                onNavigateToNotes = { navController.navigate("notes") },
+                                onNavigateToPhotoStudio = { navController.navigate("photo_studio") }
                             )
                         }
 
@@ -84,6 +85,14 @@ class MainActivity : ComponentActivity() {
                         // 5. Advanced PDF Toolkit
                         composable("pdftools") {
                             PdfToolsScreen(
+                                viewModel = viewModel,
+                                onNavigateBack = { navController.popBackStack() }
+                            )
+                        }
+
+                        // Photo Studio & Passport Maker
+                        composable("photo_studio") {
+                            PhotoStudioScreen(
                                 viewModel = viewModel,
                                 onNavigateBack = { navController.popBackStack() }
                             )

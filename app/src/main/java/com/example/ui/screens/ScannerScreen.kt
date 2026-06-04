@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.PointF
 import android.view.ViewGroup
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
@@ -69,6 +70,28 @@ fun ScannerScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { hasCameraPermission = it }
+
+    val galleryPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
+        if (uris.isNotEmpty()) {
+            uris.forEach { uri ->
+                try {
+                    context.contentResolver.openInputStream(uri)?.use { stream ->
+                        val bmp = BitmapFactory.decodeStream(stream)
+                        if (bmp != null) {
+                            val currentPages = viewModel.scanPages.value.toMutableList()
+                            currentPages.add(bmp)
+                            viewModel.scanPages.value = currentPages
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+            Toast.makeText(context, "${uris.size} images imported as pages!", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     LaunchedEffect(Unit) {
         permissionLauncher.launch(Manifest.permission.CAMERA)
@@ -345,7 +368,14 @@ fun ScannerScreen(
                                 horizontalArrangement = Arrangement.SpaceEvenly,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Spacer(modifier = Modifier.size(36.dp))
+                                IconButton(
+                                    onClick = { galleryPickerLauncher.launch("image/*") },
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .background(Color.DarkGray, CircleShape)
+                                ) {
+                                    Icon(Icons.Default.PhotoLibrary, contentDescription = "Import Gallery Images", tint = Color.White)
+                                }
                                 
                                 IconButton(
                                     onClick = { handleCapture() },

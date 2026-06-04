@@ -27,12 +27,24 @@ class DocFusionRepository(
     suspend fun deleteHistoryByPath(path: String) = 
         historyDao.deleteByPath(path)
 
+    suspend fun updateHistoryTags(id: Long, tags: String?) = 
+        historyDao.updateHistoryTags(id, tags)
+
+    suspend fun updateNoteTags(id: Long, tags: String?) = 
+        noteDao.updateNoteTags(id, tags)
+
+    suspend fun getAllHistoryList(): List<HistoryEntry> = 
+        historyDao.getAllHistoryList()
+
     // Notes Section
     fun getNotesBySecurity(secure: Boolean): Flow<List<Note>> = 
         noteDao.getNotesBySecurity(secure)
 
     suspend fun getNoteById(id: Long): Note? = 
         noteDao.getNoteById(id)
+
+    suspend fun getAllNotesList(): List<Note> = 
+        noteDao.getAllNotesList()
 
     suspend fun insertNote(note: Note): Long = 
         noteDao.insertNote(note)
