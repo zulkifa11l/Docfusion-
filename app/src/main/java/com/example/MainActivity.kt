@@ -1,152 +1,86 @@
 package com.example
 
 import android.os.Bundle
-import androidx.fragment.app.FragmentActivity
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
+import androidx.compose.animation.*
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.*
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.navigation.NavType
-import androidx.navigation.compose.*
-import androidx.navigation.navArgument
-import com.example.ui.screens.*
-import com.example.ui.theme.MyApplicationTheme
-import com.example.ui.viewmodel.DocFusionViewModel
+import com.example.ui.screens.DashboardScreen
+import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.PremiumToolsScreen
+import com.example.ui.theme.DocfusionTheme
+import com.example.ui.viewmodel.DocfusionViewModel
+import com.example.util.AdMobManager
 
-class MainActivity : FragmentActivity() {
+enum class AppScreen {
+    Home,
+    Dashboard,
+    Premium
+}
+
+class MainActivity : ComponentActivity() {
+
+    private val viewModel: DocfusionViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
         
+        // Support nice premium full bleeds
+        enableEdgeToEdge()
+
+        // Initialize AdMob managers immediately
+        AdMobManager.initialize(this)
+
         setContent {
-            val viewModel: DocFusionViewModel = viewModel()
-            val isDarkThemeEnabled = viewModel.isDarkMode
+            DocfusionTheme {
+                var currentScreen by remember { mutableStateOf(AppScreen.Home) }
 
-            MyApplicationTheme(darkTheme = isDarkThemeEnabled) {
                 Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
+                    modifier = Modifier.fillMaxSize()
                 ) {
-                    val navController = rememberNavController()
-
-                    // Startup security vault routing check
-                    val startDestination = if (viewModel.isAppLocked) "lock" else "dashboard"
-
-                    NavHost(
-                        navController = navController,
-                        startDestination = startDestination
-                    ) {
-                        // 1. PIN Lock / Setup Screen
-                        composable("lock") {
-                            AppLockScreen(
-                                viewModel = viewModel,
-                                onUnlocked = {
-                                    navController.navigate("dashboard") {
-                                        popUpTo("lock") { inclusive = true }
-                                    }
-                                }
-                            )
-                        }
-
-                        // 2. Main Dashboard screen
-                        composable("dashboard") {
-                            DashboardScreen(
-                                viewModel = viewModel,
-                                onNavigateToScan = { navController.navigate("scanner") },
-                                onNavigateToConvert = { navController.navigate("converter") },
-                                onNavigateToPdfTools = { navController.navigate("pdftools") },
-                                onNavigateToOcr = { navController.navigate("ocr") },
-                                onNavigateToHistory = { category -> navController.navigate("history/$category") },
-                                onNavigateToNotes = { navController.navigate("notes") },
-                                onNavigateToPhotoStudio = { navController.navigate("photo_studio") }
-                            )
-                        }
-
-                        // 3. Document CamScanner screen
-                        composable("scanner") {
-                            ScannerScreen(
-                                viewModel = viewModel,
-                                onNavigateBack = { navController.popBackStack() },
-                                onOcrScanned = { navController.navigate("ocr") }
-                            )
-                        }
-
-                        // 4. File and Document conversion panel
-                        composable("converter") {
-                            ConverterScreen(
-                                viewModel = viewModel,
-                                onNavigateBack = { navController.popBackStack() }
-                            )
-                        }
-
-                        // 5. Advanced PDF Toolkit
-                        composable("pdftools") {
-                            PdfToolsScreen(
-                                viewModel = viewModel,
-                                onNavigateBack = { navController.popBackStack() }
-                            )
-                        }
-
-                        // Photo Studio & Passport Maker
-                        composable("photo_studio") {
-                            PhotoStudioScreen(
-                                viewModel = viewModel,
-                                onNavigateBack = { navController.popBackStack() }
-                            )
-                        }
-
-                        // 6. Notes Text and Voice logger
-                        composable("notes") {
-                            NotesScreen(
-                                viewModel = viewModel,
-                                onNavigateBack = { navController.popBackStack() }
-                            )
-                        }
-
-                        // 7. OCR & deep text processing
-                        composable("ocr") {
-                            OcrScreen(
-                                viewModel = viewModel,
-                                onNavigateBack = { navController.popBackStack() }
-                            )
-                        }
-
-                        // 8. File Hub categories screen (Receives dynamic categories argument!)
-                        composable(
-                            route = "history/{category}",
-                            arguments = listOf(navArgument("category") { type = NavType.StringType })
-                        ) { backStackEntry ->
-                            val cat = backStackEntry.arguments?.getString("category") ?: "All"
-                            DocumentHistoryScreen(
-                                viewModel = viewModel,
-                                initialCategory = cat,
-                                onNavigateBack = { navController.popBackStack() },
-                                onNavigateToPdfReader = { path ->
-                                    val encodedPath = java.net.URLEncoder.encode(path, "UTF-8")
-                                    navController.navigate("pdf_reader?path=$encodedPath")
-                                }
-                            )
-                        }
-
-                        // 9. Interactive PDF Reader Doodle and Signature Creator Canvas
-                        composable(
-                            route = "pdf_reader?path={path}",
-                            arguments = listOf(navArgument("path") { type = NavType.StringType })
-                        ) { backStackEntry ->
-                            val path = backStackEntry.arguments?.getString("path") ?: ""
-                            val decodedPath = java.net.URLDecoder.decode(path, "UTF-8")
-                            PdfReaderScreen(
-                                viewModel = viewModel,
-                                pdfPath = decodedPath,
-                                onNavigateBack = { navController.popBackStack() }
-                            )
+                    AnimatedContent(
+                        targetState = currentScreen,
+                        transitionSpec = {
+                            fadeIn() togetherWith fadeOut()
+                        },
+                        label = "screen_routing"
+                    ) { screen ->
+                        when (screen) {
+                            AppScreen.Home -> {
+                                HomeScreen(
+                                    viewModel = viewModel,
+                                    onNavigateToDashboard = { currentScreen = AppScreen.Dashboard },
+                                    onNavigateToPremium = { currentScreen = AppScreen.Premium }
+                                )
+                            }
+                            AppScreen.Dashboard -> {
+                                DashboardScreen(
+                                    viewModel = viewModel,
+                                    onBack = { currentScreen = AppScreen.Home }
+                                )
+                            }
+                            AppScreen.Premium -> {
+                                PremiumToolsScreen(
+                                    viewModel = viewModel,
+                                    onBack = { currentScreen = AppScreen.Home }
+                                )
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Prefetch ads when returning to the application
+        AdMobManager.loadInterstitial(this)
+        AdMobManager.loadRewarded(this)
     }
 }
