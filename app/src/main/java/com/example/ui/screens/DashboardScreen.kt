@@ -60,7 +60,17 @@ fun DashboardScreen(
 
     val recentFiles = remember(historyList, searchQuery) {
         historyList.filter {
-            !it.isSecure && (searchQuery.isEmpty() || it.name.contains(searchQuery, ignoreCase = true))
+            val dateFormatted1 = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(it.timestamp))
+            val dateFormatted2 = SimpleDateFormat("MMMM d, yyyy", Locale.getDefault()).format(Date(it.timestamp))
+            val dateFormatted3 = SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(it.timestamp))
+            val dateFormatted4 = SimpleDateFormat("EEEE", Locale.getDefault()).format(Date(it.timestamp))
+
+            !it.isSecure && (searchQuery.isEmpty() || 
+                    it.name.contains(searchQuery, ignoreCase = true) ||
+                    dateFormatted1.contains(searchQuery, ignoreCase = true) ||
+                    dateFormatted2.contains(searchQuery, ignoreCase = true) ||
+                    dateFormatted3.contains(searchQuery, ignoreCase = true) ||
+                    dateFormatted4.contains(searchQuery, ignoreCase = true))
         }.take(5)
     }
 

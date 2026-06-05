@@ -95,6 +95,10 @@ class DocFusionViewModel(application: Application) : AndroidViewModel(applicatio
     var currentAudioFile: File? = null
     var currentAudioPlayingPath by mutableStateOf<String?>(null)
 
+    // Device Storage PDFs Scanning States
+    var devicePdfs by mutableStateOf<List<File>>(emptyList())
+    var isScanningDevicePdfs by mutableStateOf(false)
+
     init {
         // App is locked at cold startup if PIN feature is active
         isAppLocked = settingsManager.isAppLockEnabled
@@ -908,6 +912,62 @@ class DocFusionViewModel(application: Application) : AndroidViewModel(applicatio
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to insert manual history entry", e)
+            }
+        }
+    }
+
+    fun scanDevicePdfs() {
+        viewModelScope.launch(Dispatchers.IO) {
+            isScanningDevicePdfs = true
+            val found = mutableListOf<File>()
+            
+            // 1. App files directory
+            try {
+                val appDocs = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+                if (appDocs != null && appDocs.exists()) {
+                    appDocs.listFiles()?.forEach { file ->
+                        if (file.name.endsWith(".pdf", ignoreCase = true)) {
+                            found.add(file)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed scanning app internal documents", e)
+            }
+            
+            // 2. Downloads directory
+            try {
+                val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                scanFolderForPdfs(downloads, found, maxDepth = 3)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed scanning public Downloads dir", e)
+            }
+            
+            // 3. Documents directory
+            try {
+                val docs = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+                scanFolderForPdfs(docs, found, maxDepth = 3)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed scanning public Documents dir", e)
+            }
+
+            // Deduplicate unique files by path
+            val unique = found.distinctBy { it.absolutePath }
+            withContext(Dispatchers.Main) {
+                devicePdfs = unique
+                isScanningDevicePdfs = false
+            }
+        }
+    }
+
+    private fun scanFolderForPdfs(folder: File?, list: MutableList<File>, maxDepth: Int, currentDepth: Int = 0) {
+        if (folder == null || !folder.exists() || !folder.isDirectory() || currentDepth > maxDepth) return
+        val files = folder.listFiles() ?: return
+        for (f in files) {
+            if (f.isDirectory) {
+                scanFolderForPdfs(f, list, maxDepth, currentDepth + 1)
+            } else if (f.name.endsWith(".pdf", ignoreCase = true)) {
+                list.add(f)
             }
         }
     }

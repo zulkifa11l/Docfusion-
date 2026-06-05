@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.compose.animation.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -41,7 +42,8 @@ import java.util.*
 fun DocumentHistoryScreen(
     viewModel: DocFusionViewModel,
     initialCategory: String = "All",
-    onNavigateBack: () -> Unit
+    onNavigateBack: () -> Unit,
+    onNavigateToPdfReader: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
     val historyList by viewModel.history.collectAsState()
@@ -56,6 +58,8 @@ fun DocumentHistoryScreen(
 
     var showSaveAsDialog by remember { mutableStateOf<HistoryEntry?>(null) }
     var saveAsInputText by remember { mutableStateOf("") }
+    var customSubFolder by remember { mutableStateOf("Docfusion") }
+    var showExportConfirmDialog by remember { mutableStateOf<File?>(null) }
     var exportWithPassword by remember { mutableStateOf(false) }
     var exportPasswordText by remember { mutableStateOf("") }
 
@@ -73,18 +77,71 @@ fun DocumentHistoryScreen(
     var pinInputValue by remember { mutableStateOf("") }
     var pinErrorMsg by remember { mutableStateOf("") }
 
+    // Auto-sorting State
+    var sortCriterion by remember { mutableStateOf("Newest First") }
+    var isSortDropdownExpanded by remember { mutableStateOf(false) }
+
     // List of active files matching selection
-    val displayedFiles = remember(historyList, favoritesList, secureList, activeCategory, searchQuery, selectedFilterTag) {
+    val displayedFiles = remember(historyList, favoritesList, secureList, activeCategory, searchQuery, selectedFilterTag, sortCriterion) {
         val baseList = when (activeCategory) {
             "Secure" -> if (isSecureVaultUnlocked) secureList else emptyList()
             "Favorite" -> favoritesList
             "All" -> historyList.filter { !it.isSecure }
             else -> historyList.filter { !it.isSecure && it.category == activeCategory }
         }
-        baseList.filter {
-            val matchesSearch = searchQuery.isEmpty() || it.name.contains(searchQuery, ignoreCase = true)
+        val filtered = baseList.filter {
+            val dateFormatted1 = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(it.timestamp))
+            val dateFormatted2 = SimpleDateFormat("MMMM d, yyyy", Locale.getDefault()).format(Date(it.timestamp))
+            val dateFormatted3 = SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(it.timestamp))
+            val dateFormatted4 = SimpleDateFormat("EEEE", Locale.getDefault()).format(Date(it.timestamp)) // day of week
+
+            val matchesSearch = searchQuery.isEmpty() || 
+                    it.name.contains(searchQuery, ignoreCase = true) ||
+                    dateFormatted1.contains(searchQuery, ignoreCase = true) ||
+                    dateFormatted2.contains(searchQuery, ignoreCase = true) ||
+                    dateFormatted3.contains(searchQuery, ignoreCase = true) ||
+                    dateFormatted4.contains(searchQuery, ignoreCase = true)
+
             val matchesTag = selectedFilterTag == null || it.tags?.split(",")?.map { t -> t.trim() }?.contains(selectedFilterTag) == true
             matchesSearch && matchesTag
+        }
+        
+        when (sortCriterion) {
+            "Newest First" -> filtered.sortedByDescending { it.timestamp }
+            "Oldest First" -> filtered.sortedBy { it.timestamp }
+            "Name A-Z" -> filtered.sortedBy { it.name.lowercase() }
+            "Name Z-A" -> filtered.sortedByDescending { it.name.lowercase() }
+            "Size Largest" -> filtered.sortedByDescending { it.fileSize }
+            "Size Smallest" -> filtered.sortedBy { it.fileSize }
+            else -> filtered.sortedByDescending { it.timestamp }
+        }
+    }
+
+    // List of scanned device storage PDFs
+    val displayedDevicePdfs = remember(viewModel.devicePdfs, searchQuery, sortCriterion) {
+        val filtered = viewModel.devicePdfs.filter {
+            val dateFormatted1 = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(it.lastModified()))
+            val dateFormatted2 = SimpleDateFormat("MMMM d, yyyy", Locale.getDefault()).format(Date(it.lastModified()))
+            val dateFormatted3 = SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(it.lastModified()))
+            val dateFormatted4 = SimpleDateFormat("EEEE", Locale.getDefault()).format(Date(it.lastModified()))
+
+            val matchesSearch = searchQuery.isEmpty() || 
+                    it.name.contains(searchQuery, ignoreCase = true) ||
+                    dateFormatted1.contains(searchQuery, ignoreCase = true) ||
+                    dateFormatted2.contains(searchQuery, ignoreCase = true) ||
+                    dateFormatted3.contains(searchQuery, ignoreCase = true) ||
+                    dateFormatted4.contains(searchQuery, ignoreCase = true)
+            matchesSearch
+        }
+        
+        when (sortCriterion) {
+            "Newest First" -> filtered.sortedByDescending { it.lastModified() }
+            "Oldest First" -> filtered.sortedBy { it.lastModified() }
+            "Name A-Z" -> filtered.sortedBy { it.name.lowercase() }
+            "Name Z-A" -> filtered.sortedByDescending { it.name.lowercase() }
+            "Size Largest" -> filtered.sortedByDescending { it.length() }
+            "Size Smallest" -> filtered.sortedBy { it.length() }
+            else -> filtered.sortedByDescending { it.lastModified() }
         }
     }
 
@@ -97,6 +154,9 @@ fun DocumentHistoryScreen(
             } else {
                 showPinPromptDialog = true
             }
+        }
+        if (activeCategory == "Device Storage") {
+            viewModel.scanDevicePdfs()
         }
     }
 
@@ -216,28 +276,67 @@ fun DocumentHistoryScreen(
                 .padding(innerPadding)
                 .padding(horizontal = 16.dp)
         ) {
-            // Search field
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                placeholder = { Text("Search documents here...") },
-                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
-                shape = RoundedCornerShape(24.dp),
+            // Search field and sort options row
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 12.dp)
-            )
+                    .padding(bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("Search files & PDFs...") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    shape = RoundedCornerShape(24.dp),
+                    modifier = Modifier.weight(1f),
+                    singleLine = true
+                )
+
+                Box {
+                    IconButton(
+                        onClick = { isSortDropdownExpanded = true },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.40f), CircleShape)
+                    ) {
+                        Icon(Icons.Default.Sort, contentDescription = "Sort Options")
+                    }
+
+                    DropdownMenu(
+                        expanded = isSortDropdownExpanded,
+                        onDismissRequest = { isSortDropdownExpanded = false }
+                    ) {
+                        listOf("Newest First", "Oldest First", "Name A-Z", "Name Z-A", "Size Largest", "Size Smallest").forEach { criterion ->
+                            DropdownMenuItem(
+                                text = { Text(criterion, fontSize = 13.sp, fontWeight = if (sortCriterion == criterion) FontWeight.Bold else FontWeight.Normal) },
+                                leadingIcon = {
+                                    if (sortCriterion == criterion) {
+                                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    }
+                                },
+                                onClick = {
+                                    sortCriterion = criterion
+                                    isSortDropdownExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+            }
 
             // Category Tabs Row (skip if in Secure unlocked mode to preserve layout simplicity)
             if (activeCategory != "Secure") {
-                Row(
+                androidx.compose.foundation.lazy.LazyRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 12.dp)
+                        .padding(bottom = 12.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp)
                 ) {
-                    val categories = listOf("All", "PDF", "Scan", "Word", "Favorite")
-                    categories.forEach { cat ->
+                    val categories = listOf("All", "PDF", "Scan", "Word", "Favorite", "Device Storage")
+                    items(categories) { cat ->
                         val isSel = activeCategory == cat
                         val containerColor = if (isSel) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(0.40f)
                         val contentColor = if (isSel) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
@@ -318,7 +417,119 @@ fun DocumentHistoryScreen(
             }
 
             // Results List
-            if (displayedFiles.isEmpty()) {
+            if (activeCategory == "Device Storage") {
+                if (viewModel.isScanningDevicePdfs) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator()
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text("Scanning Device Storage...", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                } else if (displayedDevicePdfs.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.FolderZip,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier.size(54.dp)
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text("No local device PDFs found.", fontWeight = FontWeight.Medium)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Button(onClick = { viewModel.scanDevicePdfs() }) {
+                                Text("Rescan Storage")
+                            }
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(displayedDevicePdfs) { file ->
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                                shape = RoundedCornerShape(16.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PictureAsPdf,
+                                        contentDescription = null,
+                                        tint = Color(0xFFF44336),
+                                        modifier = Modifier.size(40.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = file.name,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 14.sp,
+                                            maxLines = 1
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        val mTime = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(file.lastModified()))
+                                        val sz = file.length() / 1024
+                                        Text(
+                                            text = "$mTime  •  ${sz} KB",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    
+                                    // Actions
+                                    IconButton(
+                                        onClick = { onNavigateToPdfReader(file.absolutePath) }
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Gesture,
+                                            contentDescription = "Annotate PDF",
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    
+                                    IconButton(
+                                        onClick = {
+                                            try {
+                                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                                    type = "application/pdf"
+                                                    val auth = "${context.packageName}.provider"
+                                                    val u = FileProvider.getUriForFile(context, auth, file)
+                                                    putExtra(Intent.EXTRA_STREAM, u)
+                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                }
+                                                context.startActivity(Intent.createChooser(intent, "Share PDF File"))
+                                            } catch (e: Exception) {
+                                                Toast.makeText(context, "Error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    ) {
+                                        Icon(Icons.Default.Share, contentDescription = "Share PDF", tint = MaterialTheme.colorScheme.secondary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (displayedFiles.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -386,6 +597,9 @@ fun DocumentHistoryScreen(
                             onEditTags = {
                                 tagsInputText = entry.tags ?: ""
                                 showEditTagsDialog = entry
+                            },
+                            onNavigateToPdfReader = {
+                                onNavigateToPdfReader(entry.path)
                             }
                         )
                     }
@@ -441,7 +655,7 @@ fun DocumentHistoryScreen(
                 text = {
                     Column {
                         Text("Specify name for the exported document:", style = MaterialTheme.typography.bodySmall)
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
                         OutlinedTextField(
                             value = saveAsInputText,
                             onValueChange = { saveAsInputText = it },
@@ -450,6 +664,18 @@ fun DocumentHistoryScreen(
                             singleLine = true
                         )
                         
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text("Specify custom subfolder inside Downloads:", style = MaterialTheme.typography.bodySmall)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        OutlinedTextField(
+                            value = customSubFolder,
+                            onValueChange = { customSubFolder = it },
+                            placeholder = { Text("Docfusion") },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            singleLine = true
+                        )
+
                         if (isPdf) {
                             Spacer(modifier = Modifier.height(12.dp))
                             Row(
@@ -489,7 +715,7 @@ fun DocumentHistoryScreen(
                         
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "This file will be compiled and exported directly to public Downloads/Docfusion folder.",
+                            text = "This file will be compiled and exported directly to Downloads/$customSubFolder folder on your storage.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -513,7 +739,7 @@ fun DocumentHistoryScreen(
                                                 exportPasswordText.trim(),
                                                 true
                                             )
-                                            val resultUri = com.example.util.exportFileToDownloads(context, tempEncrypted, trimmedName)
+                                            val resultUri = com.example.util.exportFileToDownloads(context, tempEncrypted, trimmedName, customSubFolder.trim().ifEmpty { "Docfusion" })
                                             tempEncrypted.delete()
                                             resultUri
                                         } catch (e: Exception) {
@@ -521,15 +747,11 @@ fun DocumentHistoryScreen(
                                             null
                                         }
                                     } else {
-                                        com.example.util.exportFileToDownloads(context, originalFile, trimmedName)
+                                        com.example.util.exportFileToDownloads(context, originalFile, trimmedName, customSubFolder.trim().ifEmpty { "Docfusion" })
                                     }
                                     
                                     if (uri != null) {
-                                        if (isPdf && exportWithPassword && exportPasswordText.isNotBlank()) {
-                                            Toast.makeText(context, "Password encrypted PDF saved to Downloads/Docfusion !", Toast.LENGTH_LONG).show()
-                                        } else {
-                                            Toast.makeText(context, "Exported successfully to Downloads/Docfusion !", Toast.LENGTH_LONG).show()
-                                        }
+                                        showExportConfirmDialog = originalFile
                                     } else {
                                         Toast.makeText(context, "Failed to copy file to storage.", Toast.LENGTH_SHORT).show()
                                     }
@@ -547,6 +769,98 @@ fun DocumentHistoryScreen(
                 dismissButton = {
                     TextButton(onClick = { showSaveAsDialog = null }) {
                         Text("Cancel")
+                    }
+                }
+            )
+        }
+
+        // Export Confirmation Dialog
+        if (showExportConfirmDialog != null) {
+            val fileToOpen = showExportConfirmDialog!!
+            val isPdfToOpen = fileToOpen.name.endsWith(".pdf", ignoreCase = true)
+            AlertDialog(
+                onDismissRequest = { showExportConfirmDialog = null },
+                title = { 
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Check, contentDescription = null, tint = Color(0xFF4CAF50), modifier = Modifier.size(24.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Export Success", fontWeight = FontWeight.Bold)
+                    }
+                },
+                text = {
+                    Column {
+                        Text(
+                            text = "Your document has been compiled and exported successfully!",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Name: ${fileToOpen.name}\nSubfolder: Downloads/$customSubFolder",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                confirmButton = {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Button(
+                            onClick = {
+                                try {
+                                    val authority = "${context.packageName}.provider"
+                                    val uri = FileProvider.getUriForFile(context, authority, fileToOpen)
+                                    val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                        type = if (isPdfToOpen) "application/pdf" else "*/*"
+                                        putExtra(Intent.EXTRA_STREAM, uri)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(Intent.createChooser(shareIntent, "Share Exported File"))
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "Error sharing file: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                        ) {
+                            Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Share", fontSize = 12.sp)
+                        }
+
+                        Button(
+                            onClick = {
+                                try {
+                                    val authority = "${context.packageName}.provider"
+                                    val uri = FileProvider.getUriForFile(context, authority, fileToOpen)
+                                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                                        if (isPdfToOpen) {
+                                            setDataAndType(uri, "application/pdf")
+                                        } else {
+                                            setDataAndType(uri, "*/*")
+                                        }
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(Intent.createChooser(intent, "Open File"))
+                                } catch (e: Exception) {
+                                    Toast.makeText(context, "No app found to open this file.", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Open", fontSize = 12.sp)
+                        }
+
+                        TextButton(
+                            onClick = { showExportConfirmDialog = null }
+                        ) {
+                            Text("Close")
+                        }
                     }
                 }
             )
@@ -676,7 +990,8 @@ fun HistoryEntryCard(
     onRename: () -> Unit,
     onDelete: () -> Unit,
     onSaveAs: () -> Unit,
-    onEditTags: () -> Unit
+    onEditTags: () -> Unit,
+    onNavigateToPdfReader: () -> Unit = {}
 ) {
     val sdf = remember { SimpleDateFormat("MMMd, yyyy h:mm a", Locale.getDefault()) }
     val formattedDate = remember(entry.timestamp) { sdf.format(Date(entry.timestamp)) }
@@ -809,6 +1124,16 @@ fun HistoryEntryCard(
                             expanded = showMenu,
                             onDismissRequest = { showMenu = false }
                         ) {
+                            if (entry.category == "PDF" || entry.name.endsWith(".pdf", ignoreCase = true)) {
+                                DropdownMenuItem(
+                                    text = { Text("Doodle & Sign PDF", fontWeight = FontWeight.Bold) },
+                                    leadingIcon = { Icon(Icons.Default.Gesture, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                                    onClick = {
+                                        showMenu = false
+                                        onNavigateToPdfReader()
+                                    }
+                                )
+                            }
                             DropdownMenuItem(
                                 text = { Text("Open / Share") },
                                 leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },

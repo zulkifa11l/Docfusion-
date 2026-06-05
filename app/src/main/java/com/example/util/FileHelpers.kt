@@ -11,7 +11,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 
-fun exportFileToDownloads(context: Context, sourceFile: File, displayName: String): Uri? {
+fun exportFileToDownloads(context: Context, sourceFile: File, displayName: String, customFolder: String = "Docfusion"): Uri? {
     val resolver = context.contentResolver
     val contentValues = ContentValues().apply {
         put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
@@ -24,7 +24,7 @@ fun exportFileToDownloads(context: Context, sourceFile: File, displayName: Strin
             else -> "*/*"
         })
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Docfusion")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/" + customFolder)
         }
     }
     
@@ -33,7 +33,9 @@ fun exportFileToDownloads(context: Context, sourceFile: File, displayName: Strin
     } else {
         @Suppress("DEPRECATION")
         val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val destFile = File(downloadsDir, displayName)
+        val destSubDir = if (customFolder.isNotEmpty()) File(downloadsDir, customFolder) else downloadsDir
+        if (!destSubDir.exists()) destSubDir.mkdirs()
+        val destFile = File(destSubDir, displayName)
         try {
             sourceFile.inputStream().use { input ->
                 destFile.outputStream().use { output ->

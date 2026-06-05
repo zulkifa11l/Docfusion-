@@ -31,10 +31,40 @@ object PdfProcessor {
 
         for ((index, file) in imageFiles.withIndex()) {
             val originalBitmap = BitmapFactory.decodeFile(file.absolutePath) ?: continue
-            val processedBitmap = if (options.isGrayscale) {
-                convertToGrayscale(originalBitmap)
+
+            // 1. Scale down extremely large images if compression is active to save lots of space
+            val scaledBitmap = if (options.compressQuality < 100) {
+                val maxDim = if (options.compressQuality <= 35) 900 else if (options.compressQuality <= 65) 1300 else 1800
+                if (originalBitmap.width > maxDim || originalBitmap.height > maxDim) {
+                    val scale = maxDim.toFloat() / max(originalBitmap.width, originalBitmap.height)
+                    Bitmap.createScaledBitmap(
+                        originalBitmap,
+                        (originalBitmap.width * scale).toInt(),
+                        (originalBitmap.height * scale).toInt(),
+                        true
+                    )
+                } else {
+                    originalBitmap
+                }
             } else {
                 originalBitmap
+            }
+
+            // 2. Apply Grayscale if requested
+            val processedBitmap = if (options.isGrayscale) {
+                convertToGrayscale(scaledBitmap)
+            } else {
+                scaledBitmap
+            }
+
+            // 3. Apply quality compression to the processed bitmap if quality < 100
+            val finalBitmap = if (options.compressQuality < 100) {
+                val bos = ByteArrayOutputStream()
+                processedBitmap.compress(Bitmap.CompressFormat.JPEG, options.compressQuality, bos)
+                val bytes = bos.toByteArray()
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            } else {
+                processedBitmap
             }
 
             // Determine dimensions based on selected options
@@ -42,7 +72,7 @@ object PdfProcessor {
                 "Passport" -> Pair(144, 144) // 2x2 inches (at 72 dpi)
                 "ID Card" -> Pair(243, 153)  // 3.375 x 2.125 inches (CR80)
                 "Letter" -> Pair(612, 792)   // 8.5 x 11 inches
-                "Original" -> Pair(processedBitmap.width, processedBitmap.height)
+                "Original" -> Pair(finalBitmap.width, finalBitmap.height)
                 else -> Pair(595, 842)       // A4 size: 595 x 842 pt
             }
 
@@ -60,12 +90,12 @@ object PdfProcessor {
             val maxDrawHeight = pageHeight - (margin * 2)
 
             val scale = min(
-                maxDrawWidth / processedBitmap.width.toFloat(),
-                maxDrawHeight / processedBitmap.height.toFloat()
+                maxDrawWidth / finalBitmap.width.toFloat(),
+                maxDrawHeight / finalBitmap.height.toFloat()
             )
 
-            val drawWidth = processedBitmap.width * scale
-            val drawHeight = processedBitmap.height * scale
+            val drawWidth = finalBitmap.width * scale
+            val drawHeight = finalBitmap.height * scale
 
             val left = (pageWidth - drawWidth) / 2f
             val top = (pageHeight - drawHeight) / 2f
@@ -76,12 +106,18 @@ object PdfProcessor {
                 isAntiAlias = true
             }
 
-            canvas.drawBitmap(processedBitmap, null, destRect, paint)
+            canvas.drawBitmap(finalBitmap, null, destRect, paint)
             pdfDocument.finishPage(page)
 
-            // Recycle bitmap copy if created
-            if (processedBitmap != originalBitmap) {
+            // Recycle intermediate temporary bitmaps safely to prevent OOM
+            if (finalBitmap != processedBitmap) {
+                finalBitmap.recycle()
+            }
+            if (processedBitmap != scaledBitmap) {
                 processedBitmap.recycle()
+            }
+            if (scaledBitmap != originalBitmap) {
+                scaledBitmap.recycle()
             }
             originalBitmap.recycle()
         }

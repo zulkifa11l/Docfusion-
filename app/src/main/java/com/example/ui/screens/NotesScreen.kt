@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 import android.widget.Toast
+import android.content.Intent
+import androidx.core.content.FileProvider
 import androidx.compose.animation.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -302,12 +304,68 @@ fun NotesScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text(note.title, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
-                                    IconButton(
-                                        onClick = { viewModel.deleteNote(note) },
-                                        modifier = Modifier.size(24.dp)
+                                    Text(
+                                        text = note.title,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 16.sp,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
+                                        // Share note text natively
+                                        IconButton(
+                                            onClick = {
+                                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                                    type = "text/plain"
+                                                    putExtra(Intent.EXTRA_SUBJECT, note.title)
+                                                    putExtra(Intent.EXTRA_TEXT, "${note.title}\n\n${note.content}")
+                                                }
+                                                context.startActivity(Intent.createChooser(intent, "Share Note Text"))
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(Icons.Default.Share, contentDescription = "Share Text", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                                        }
+
+                                        // Export Note as PDF and launch share
+                                        IconButton(
+                                            onClick = {
+                                                val tempFile = File(context.cacheDir, "temp_note_${note.id}.txt").apply {
+                                                    writeText("${note.title}\n\n${note.content}")
+                                                }
+                                                viewModel.performConversion("Text to PDF", tempFile) {
+                                                    tempFile.delete()
+                                                    Toast.makeText(context, "Note exported as PDF and saved to history!", Toast.LENGTH_LONG).show()
+                                                    try {
+                                                        val pdfName = "temp_note_${note.id}_text.pdf"
+                                                        val exportedPdfFile = File(context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOCUMENTS), pdfName)
+                                                        val authority = "${context.packageName}.provider"
+                                                        val uri = FileProvider.getUriForFile(context, authority, exportedPdfFile)
+                                                        val intent = Intent(Intent.ACTION_SEND).apply {
+                                                            type = "application/pdf"
+                                                            putExtra(Intent.EXTRA_STREAM, uri)
+                                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                        }
+                                                        context.startActivity(Intent.createChooser(intent, "Share Note PDF"))
+                                                    } catch (e: Exception) {
+                                                        Toast.makeText(context, "Error sharing note PDF: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                            },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(Icons.Default.PictureAsPdf, contentDescription = "Export Note PDF", tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(16.dp))
+                                        }
+
+                                        IconButton(
+                                            onClick = { viewModel.deleteNote(note) },
+                                            modifier = Modifier.size(24.dp)
+                                        ) {
+                                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
+                                        }
                                     }
                                 }
                                 

@@ -1,5 +1,10 @@
 package com.example.ui.screens
 
+import androidx.biometric.BiometricPrompt
+import androidx.biometric.BiometricManager
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,6 +37,64 @@ fun AppLockScreen(
     var tempPin by remember { mutableStateOf("") }
     var statusMsg by remember { mutableStateOf(if (isPinSaved) "Enter PIN to access Docfusion" else "Create a safe 4-digit PIN lock") }
     var isError by remember { mutableStateOf(false) }
+
+    val context = LocalContext.current
+    val activity = context as? FragmentActivity
+    val executor = remember(context) { ContextCompat.getMainExecutor(context) }
+    
+    val biometricPrompt = remember(activity) {
+        if (activity != null) {
+            BiometricPrompt(activity, executor, object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    super.onAuthenticationError(errorCode, errString)
+                    // If user cancels or clicks back, do not force an error state
+                    if (errorCode != BiometricPrompt.ERROR_USER_CANCELED && errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON) {
+                        statusMsg = "Biometric error: $errString"
+                        isError = true
+                    }
+                }
+
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    super.onAuthenticationSucceeded(result)
+                    onUnlocked()
+                }
+
+                override fun onAuthenticationFailed() {
+                    super.onAuthenticationFailed()
+                    statusMsg = "Recognition failed. Please try again."
+                    isError = true
+                }
+            })
+        } else null
+    }
+
+    val promptInfo = remember {
+        BiometricPrompt.PromptInfo.Builder()
+            .setTitle("Docfusion Secure Unlock")
+            .setSubtitle("Use your fingerprint or facial recognition to access the app")
+            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL)
+            .build()
+    }
+
+    fun triggerBiometricPrompt() {
+        if (biometricPrompt != null) {
+            try {
+                biometricPrompt.authenticate(promptInfo)
+            } catch (e: Exception) {
+                statusMsg = "Biometrics unavailable: ${e.localizedMessage}"
+                isError = true
+            }
+        } else {
+            statusMsg = "Biometric setup failed to initialize"
+            isError = true
+        }
+    }
+
+    LaunchedEffect(isPinSaved) {
+        if (isPinSaved) {
+            triggerBiometricPrompt()
+        }
+    }
 
     fun handlePinDigit(digit: String) {
         if (enteredPin.length < 4) {
@@ -173,8 +236,10 @@ fun AppLockScreen(
                                             .clip(CircleShape)
                                             .clickable {
                                                 if (isPinSaved) {
-                                                    // Biometric unlock shortcut validation
-                                                    onUnlocked()
+                                                    triggerBiometricPrompt()
+                                                } else {
+                                                    statusMsg = "Please establish a PIN first before using Biometrics"
+                                                    isError = true
                                                 }
                                             },
                                         contentAlignment = Alignment.Center

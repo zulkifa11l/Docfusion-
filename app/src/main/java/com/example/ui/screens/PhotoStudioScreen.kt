@@ -1223,7 +1223,7 @@ fun ExportTab(
             }
             
             // Share using content providers safely
-            val providerAuthority = "${context.packageName}.fileprovider"
+            val providerAuthority = "${context.packageName}.provider"
             val uri = androidx.core.content.FileProvider.getUriForFile(context, providerAuthority, cachedImageFile)
             
             val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {

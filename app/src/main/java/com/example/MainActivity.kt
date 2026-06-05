@@ -1,7 +1,7 @@
 package com.example
 
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,7 +16,7 @@ import com.example.ui.screens.*
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.viewmodel.DocFusionViewModel
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -123,6 +123,24 @@ class MainActivity : ComponentActivity() {
                             DocumentHistoryScreen(
                                 viewModel = viewModel,
                                 initialCategory = cat,
+                                onNavigateBack = { navController.popBackStack() },
+                                onNavigateToPdfReader = { path ->
+                                    val encodedPath = java.net.URLEncoder.encode(path, "UTF-8")
+                                    navController.navigate("pdf_reader?path=$encodedPath")
+                                }
+                            )
+                        }
+
+                        // 9. Interactive PDF Reader Doodle and Signature Creator Canvas
+                        composable(
+                            route = "pdf_reader?path={path}",
+                            arguments = listOf(navArgument("path") { type = NavType.StringType })
+                        ) { backStackEntry ->
+                            val path = backStackEntry.arguments?.getString("path") ?: ""
+                            val decodedPath = java.net.URLDecoder.decode(path, "UTF-8")
+                            PdfReaderScreen(
+                                viewModel = viewModel,
+                                pdfPath = decodedPath,
                                 onNavigateBack = { navController.popBackStack() }
                             )
                         }

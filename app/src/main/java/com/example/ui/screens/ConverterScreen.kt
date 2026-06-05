@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
@@ -40,6 +41,18 @@ import com.example.ui.viewmodel.DocFusionViewModel
 import com.example.util.PdfProcessor
 import com.example.util.getFileFromUri
 import com.example.util.resolveFileName
+import android.graphics.BitmapFactory
+import android.os.Environment
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material.icons.filled.DynamicFeed
+import androidx.compose.material.icons.filled.InsertDriveFile
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import com.example.util.GeminiHelper
+import com.example.BuildConfig
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
@@ -55,6 +68,22 @@ fun ConverterScreen(
     val context = LocalContext.current
     var activeConversionTask by remember { mutableStateOf("Text to PDF") }
     
+    // Batch Processing State overrides
+    var selectedTab by remember { mutableStateOf("Single") } // "Single", "Batch"
+    val selectedBatchFileIds = remember { mutableStateMapOf<Long, Boolean>() }
+    var searchBatchQuery by remember { mutableStateOf("") }
+    var batchAction by remember { mutableStateOf("PDF Compression") } // "PDF Compression", "Add Watermark", "Encrypt Password", "Extract Text (OCR)"
+    var batchCompressionQuality by remember { mutableStateOf(50f) }
+    var batchWatermarkText by remember { mutableStateOf("CONFIDENTIAL") }
+    var batchPassword by remember { mutableStateOf("") }
+    
+    var isProcessingBatch by remember { mutableStateOf(false) }
+    var batchProgressMsg by remember { mutableStateOf("") }
+    var batchResults by remember { mutableStateOf<List<BatchResult>>(emptyList()) }
+    var showBatchResultsDialog by remember { mutableStateOf(false) }
+    
+    val coroutineScope = rememberCoroutineScope()
+    
     // Picked File States
     var selectedFileUri by remember { mutableStateOf<Uri?>(null) }
     var selectedFileName by remember { mutableStateOf("") }
@@ -68,6 +97,9 @@ fun ConverterScreen(
 
     // Pick PDF size options mapping (fit page, passport size, etc.)
     var selectedPageSizeOption by remember { mutableStateOf("A4") }
+    
+    // Quality compression selection state -> Low, Medium, High, Original
+    var selectedQualityOption by remember { mutableStateOf("Medium") }
 
     // Text Source options Segment Selector -> "Manual", "Saved Notes", "Scanner OCR"
     var textSourceOption by remember { mutableStateOf("Manual") }
@@ -129,8 +161,50 @@ fun ConverterScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Task Selector Menu Card
-            Card(
+            // Segmented Top Tab Selector Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                listOf("Single Converter", "Batch Processing").forEach { option ->
+                    val isSel = (option == "Single Converter" && selectedTab == "Single") || (option == "Batch Processing" && selectedTab == "Batch")
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isSel) MaterialTheme.colorScheme.primary else Color.Transparent)
+                            .clickable { selectedTab = if (option == "Single Converter") "Single" else "Batch" }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (option == "Single Converter") Icons.Default.InsertDriveFile else Icons.Default.DynamicFeed,
+                                contentDescription = null,
+                                tint = if (isSel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                text = option,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isSel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (selectedTab == "Single") {
+                // Task Selector Menu Card
+                Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 shape = RoundedCornerShape(16.dp),
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
@@ -635,6 +709,22 @@ fun ConverterScreen(
                             )
                         }
                     }
+                    
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Compress PDF: Image Quality", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(top = 8.dp)
+                    ) {
+                        listOf("Low", "Medium", "High", "Original").forEach { qOption ->
+                            val isSel = selectedQualityOption == qOption
+                            ElevatedFilterChip(
+                                selected = isSel,
+                                onClick = { selectedQualityOption = qOption },
+                                label = { Text(qOption, fontSize = 11.sp) }
+                            )
+                        }
+                    }
                 }
             }
 
@@ -666,6 +756,12 @@ fun ConverterScreen(
                             }
                         }
                     } else if (activeConversionTask == "Image to PDF") {
+                        val qualityVal = when (selectedQualityOption) {
+                            "Low" -> 30
+                            "Medium" -> 60
+                            "High" -> 85
+                            else -> 100
+                        }
                         if (imageSourceOption == "Gallery Device") {
                             if (selectedFilesUris.isEmpty()) {
                                 Toast.makeText(context, "Please select at least one gallery image first.", Toast.LENGTH_SHORT).show()
@@ -682,7 +778,7 @@ fun ConverterScreen(
                                 return@Button
                             }
                             
-                            val options = PdfProcessor.PdfOptions(pageSize = selectedPageSizeOption)
+                            val options = PdfProcessor.PdfOptions(pageSize = selectedPageSizeOption, compressQuality = qualityVal)
                             viewModel.convertMultipleImagesToCustomPdf(filesList, options) {
                                 filesList.forEach { it.delete() }
                                 val latestFile = discoverLatestHistoryEntryFile(viewModel, "Image to PDF")
@@ -701,7 +797,7 @@ fun ConverterScreen(
                                 Toast.makeText(context, "Please choose at least 1 stored application scan file.", Toast.LENGTH_SHORT).show()
                                 return@Button
                             }
-                            val options = PdfProcessor.PdfOptions(pageSize = selectedPageSizeOption)
+                            val options = PdfProcessor.PdfOptions(pageSize = selectedPageSizeOption, compressQuality = qualityVal)
                             viewModel.convertStoredImagesToPdf(
                                 entries = selectedStoredImages.toList(),
                                 pdfName = outputFileNameText,
@@ -744,6 +840,31 @@ fun ConverterScreen(
                 shape = RoundedCornerShape(24.dp)
             ) {
                 Text("Start Conversion", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            }
+            } else {
+                BatchProcessingModule(
+                    viewModel = viewModel,
+                    historyList = historyList,
+                    searchBatchQuery = searchBatchQuery,
+                    onSearchBatchQueryChange = { searchBatchQuery = it },
+                    selectedBatchFileIds = selectedBatchFileIds,
+                    batchAction = batchAction,
+                    onBatchActionChange = { batchAction = it },
+                    batchCompressionQuality = batchCompressionQuality,
+                    onBatchCompressionQualityChange = { batchCompressionQuality = it },
+                    batchWatermarkText = batchWatermarkText,
+                    onBatchWatermarkTextChange = { batchWatermarkText = it },
+                    batchPassword = batchPassword,
+                    onBatchPasswordChange = { batchPassword = it },
+                    isProcessingBatch = isProcessingBatch,
+                    onIsProcessingBatchChange = { isProcessingBatch = it },
+                    batchProgressMsg = batchProgressMsg,
+                    onBatchProgressMsgChange = { batchProgressMsg = it },
+                    batchResults = batchResults,
+                    onBatchResultsChange = { batchResults = it },
+                    showBatchResultsDialog = showBatchResultsDialog,
+                    onShowBatchResultsDialogChange = { showBatchResultsDialog = it }
+                )
             }
         }
 
@@ -910,5 +1031,574 @@ fun shareExportedFile(context: Context, file: File) {
     } catch (e: Exception) {
         e.printStackTrace()
         Toast.makeText(context, "Sharing failed: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+    }
+}
+
+data class BatchResult(
+    val originalName: String,
+    val originalSize: Long,
+    val newName: String,
+    val newSize: Long,
+    val path: String,
+    val success: Boolean,
+    val error: String? = null
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun BatchProcessingModule(
+    viewModel: DocFusionViewModel,
+    historyList: List<HistoryEntry>,
+    searchBatchQuery: String,
+    onSearchBatchQueryChange: (String) -> Unit,
+    selectedBatchFileIds: MutableMap<Long, Boolean>,
+    batchAction: String,
+    onBatchActionChange: (String) -> Unit,
+    batchCompressionQuality: Float,
+    onBatchCompressionQualityChange: (Float) -> Unit,
+    batchWatermarkText: String,
+    onBatchWatermarkTextChange: (String) -> Unit,
+    batchPassword: String,
+    onBatchPasswordChange: (String) -> Unit,
+    isProcessingBatch: Boolean,
+    onIsProcessingBatchChange: (Boolean) -> Unit,
+    batchProgressMsg: String,
+    onBatchProgressMsgChange: (String) -> Unit,
+    batchResults: List<BatchResult>,
+    onBatchResultsChange: (List<BatchResult>) -> Unit,
+    showBatchResultsDialog: Boolean,
+    onShowBatchResultsDialogChange: (Boolean) -> Unit
+) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
+    val filteredHistory = remember(historyList, searchBatchQuery, batchAction) {
+        historyList.filter { entry ->
+            val matchesSearch = searchBatchQuery.isEmpty() || entry.name.contains(searchBatchQuery, ignoreCase = true)
+            val matchesType = when (batchAction) {
+                "PDF Compression", "Add Watermark" -> entry.name.endsWith(".pdf", ignoreCase = true)
+                "Extract Text (OCR)" -> entry.name.endsWith(".pdf", ignoreCase = true) || 
+                                       entry.name.endsWith(".jpg", ignoreCase = true) || 
+                                       entry.name.endsWith(".jpeg", ignoreCase = true) || 
+                                       entry.name.endsWith(".png", ignoreCase = true)
+                else -> true
+            }
+            matchesSearch && matchesType
+        }
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "1. Unified Operation Settings",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    var expandedActions by remember { mutableStateOf(false) }
+                    val actionsList = listOf("PDF Compression", "Add Watermark", "Encrypt Password", "Extract Text (OCR)")
+
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = { expandedActions = true },
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Icon(
+                                        imageVector = when (batchAction) {
+                                            "PDF Compression" -> Icons.Default.Compress
+                                            "Add Watermark" -> Icons.Default.BorderColor
+                                            "Encrypt Password" -> Icons.Default.Lock
+                                            else -> Icons.Default.DocumentScanner
+                                        },
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(batchAction, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                }
+                                Icon(Icons.Default.ArrowDropDown, contentDescription = null, modifier = Modifier.size(18.dp))
+                            }
+                        }
+
+                        DropdownMenu(
+                            expanded = expandedActions,
+                            onDismissRequest = { expandedActions = false },
+                            modifier = Modifier.fillMaxWidth(0.85f)
+                        ) {
+                            actionsList.forEach { act ->
+                                DropdownMenuItem(
+                                    text = { Text(act) },
+                                    onClick = {
+                                        onBatchActionChange(act)
+                                        expandedActions = false
+                                        selectedBatchFileIds.clear()
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    when (batchAction) {
+                        "PDF Compression" -> {
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Compression Level", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("${batchCompressionQuality.toInt()}% Quality", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                                }
+                                Slider(
+                                    value = batchCompressionQuality,
+                                    onValueChange = onBatchCompressionQualityChange,
+                                    valueRange = 10f..90f,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Text("Lower quality percent yields smaller files.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        "Add Watermark" -> {
+                            OutlinedTextField(
+                                value = batchWatermarkText,
+                                onValueChange = onBatchWatermarkTextChange,
+                                label = { Text("Watermark Text Overlay") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                        }
+                        "Encrypt Password" -> {
+                            OutlinedTextField(
+                                value = batchPassword,
+                                onValueChange = onBatchPasswordChange,
+                                label = { Text("Master Password Key") },
+                                placeholder = { Text("Enter a secure lock password") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(8.dp)
+                            )
+                        }
+                        "Extract Text (OCR)" -> {
+                            Text(
+                                text = "Applies vision transcribing to extract textual content from all chosen files.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(16.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "2. Select Documents to Process",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    OutlinedTextField(
+                        value = searchBatchQuery,
+                        onValueChange = onSearchBatchQueryChange,
+                        placeholder = { Text("Search your local documents...") },
+                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TextButton(
+                            onClick = {
+                                filteredHistory.forEach { selectedBatchFileIds[it.id] = true }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.SelectAll, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Select All (${filteredHistory.size})", fontSize = 12.sp)
+                        }
+                        TextButton(
+                            onClick = {
+                                selectedBatchFileIds.clear()
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Deselect, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Deselect All", fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (filteredHistory.isEmpty()) {
+            item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(0.40f), modifier = Modifier.size(48.dp))
+                        Text("No matching documents found in File Hub", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text("Only files matching '$batchAction' are listed.", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        } else {
+            items(filteredHistory, key = { it.id }) { entry ->
+                val isSelected = selectedBatchFileIds[entry.id] == true
+                val sizeStr = remember(entry.fileSize) {
+                    val kb = entry.fileSize / 1024
+                    if (kb > 1024) String.format(Locale.US, "%.1f MB", kb / 1024f) else "$kb KB"
+                }
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { selectedBatchFileIds[entry.id] = !isSelected },
+                    border = BorderStroke(
+                        width = if (isSelected) 2.dp else 1.dp,
+                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                    ),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(0.12f)
+                                         else MaterialTheme.colorScheme.surface
+                    ),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Checkbox(
+                            checked = isSelected,
+                            onCheckedChange = { selectedBatchFileIds[entry.id] = it ?: false }
+                        )
+
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(
+                                    when (entry.category) {
+                                        "PDF" -> Color(0xFFFFECEB)
+                                        "Word" -> Color(0xFFE8F1FF)
+                                        "Images", "Scan" -> Color(0xFFE6F7FF)
+                                        else -> MaterialTheme.colorScheme.surfaceVariant
+                                    }
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = when (entry.category) {
+                                    "PDF" -> Icons.Default.PictureAsPdf
+                                    "Word" -> Icons.Default.Description
+                                    "Images", "Scan" -> Icons.Default.Image
+                                    else -> Icons.Default.InsertDriveFile
+                                },
+                                contentDescription = null,
+                                tint = when (entry.category) {
+                                    "PDF" -> Color(0xFFD32F2F)
+                                    "Word" -> Color(0xFF1976D2)
+                                    "Images", "Scan" -> Color(0xFF0288D1)
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = entry.name,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text(sizeStr, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    text = SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(entry.timestamp)),
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Spacer(modifier = Modifier.height(16.dp))
+            val selectedCount = remember(selectedBatchFileIds.values.size, selectedBatchFileIds) {
+                selectedBatchFileIds.values.count { it }
+            }
+
+            Button(
+                onClick = {
+                    val targetFiles = historyList.filter { selectedBatchFileIds[it.id] == true }
+                    if (targetFiles.isEmpty()) {
+                        Toast.makeText(context, "Please select at least 1 document to process", Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+
+                    coroutineScope.launch(Dispatchers.IO) {
+                        onIsProcessingBatchChange(true)
+                        val results = mutableListOf<BatchResult>()
+
+                        targetFiles.forEachIndexed { idx, entry ->
+                            val sourceFile = File(entry.path)
+                            if (!sourceFile.exists()) {
+                                results.add(BatchResult(entry.name, entry.fileSize, entry.name, 0, entry.path, false, "Physical file was missing"))
+                                return@forEachIndexed
+                            }
+
+                            onBatchProgressMsgChange("Processing [${idx + 1}/${targetFiles.size}]: ${entry.name}...")
+                            try {
+                                val outName = when (batchAction) {
+                                    "PDF Compression" -> "${sourceFile.nameWithoutExtension}_compressed_${System.currentTimeMillis() / 1000}.pdf"
+                                    "Add Watermark" -> "${sourceFile.nameWithoutExtension}_watermarked_${System.currentTimeMillis() / 1000}.pdf"
+                                    "Encrypt Password" -> "${sourceFile.nameWithoutExtension}_encrypted_${System.currentTimeMillis() / 1000}.pdf"
+                                    "Extract Text (OCR)" -> "${sourceFile.nameWithoutExtension}_text_${System.currentTimeMillis() / 1000}.txt"
+                                    else -> "${sourceFile.nameWithoutExtension}_batch_${System.currentTimeMillis() / 1000}.${sourceFile.extension}"
+                                }
+
+                                val outDir = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS) ?: context.filesDir
+                                val outFile = File(outDir, outName)
+
+                                when (batchAction) {
+                                    "PDF Compression" -> {
+                                        PdfProcessor.compressPdf(sourceFile, outFile, batchCompressionQuality.toInt())
+                                    }
+                                    "Add Watermark" -> {
+                                        PdfProcessor.addWatermark(sourceFile, outFile, batchWatermarkText)
+                                    }
+                                    "Encrypt Password" -> {
+                                        if (batchPassword.isEmpty()) {
+                                            throw IllegalArgumentException("Passphrase key required")
+                                        }
+                                        PdfProcessor.encryptDecryptFile(context, sourceFile, outFile, batchPassword, encrypt = true)
+                                    }
+                                    "Extract Text (OCR)" -> {
+                                        if (sourceFile.extension.lowercase() == "pdf") {
+                                            val cachedImages = PdfProcessor.pdfToImages(sourceFile, context.cacheDir, 60)
+                                            val ocrBuilder = StringBuilder()
+                                            if (cachedImages.isNotEmpty()) {
+                                                cachedImages.forEachIndexed { pageIdx, frame ->
+                                                    val bitmap = BitmapFactory.decodeFile(frame.absolutePath)
+                                                    if (bitmap != null) {
+                                                        ocrBuilder.append("--- PAGE ${pageIdx + 1} ---\n")
+                                                        val key = BuildConfig.GEMINI_API_KEY
+                                                        val text = if (key.isNotEmpty() && key != "MY_GEMINI_API_KEY") {
+                                                            GeminiHelper.performOcr(bitmap, "Extract clean text. No summaries.")
+                                                        } else {
+                                                            "Gemini AI Offline OCR placeholder. Please verify your API Key in secrets panel."
+                                                        }
+                                                        ocrBuilder.append(text).append("\n\n")
+                                                    }
+                                                    frame.delete()
+                                                }
+                                            }
+                                            outFile.writeText(ocrBuilder.toString())
+                                        } else {
+                                            val bitmap = BitmapFactory.decodeFile(sourceFile.absolutePath)
+                                            if (bitmap != null) {
+                                                val key = BuildConfig.GEMINI_API_KEY
+                                                val text = if (key.isNotEmpty() && key != "MY_GEMINI_API_KEY") {
+                                                    GeminiHelper.performOcr(bitmap)
+                                                } else {
+                                                    "Gemini AI Offline OCR placeholder. Please verify your API Key in secrets panel."
+                                                }
+                                                outFile.writeText(text)
+                                            } else {
+                                                throw IllegalArgumentException("Failed to decode image data")
+                                            }
+                                        }
+                                    }
+                                }
+
+                                val finalCategory = if (batchAction == "Extract Text (OCR)") "Text" else entry.category
+                                viewModel.insertManualHistoryEntry(
+                                    name = outName,
+                                    absolutePath = outFile.absolutePath,
+                                    category = finalCategory,
+                                    size = outFile.length()
+                                )
+
+                                results.add(BatchResult(entry.name, entry.fileSize, outName, outFile.length(), outFile.absolutePath, true))
+                            } catch (e: Exception) {
+                                results.add(BatchResult(entry.name, entry.fileSize, entry.name, 0, entry.path, false, e.localizedMessage ?: "Operation failed"))
+                            }
+                        }
+
+                        withContext(Dispatchers.Main) {
+                            onIsProcessingBatchChange(false)
+                            onBatchResultsChange(results)
+                            onShowBatchResultsDialogChange(true)
+                            viewModel.scanDevicePdfs()
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(54.dp),
+                enabled = selectedCount > 0,
+                shape = RoundedCornerShape(27.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                )
+            ) {
+                Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Process Unified Batch ($selectedCount Files)", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            }
+        }
+    }
+
+    if (isProcessingBatch) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(0.7f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                modifier = Modifier.padding(24.dp),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    Text(
+                        text = "Unified Batch Operation in Progress",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = batchProgressMsg,
+                        textAlign = TextAlign.Center,
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+
+    if (showBatchResultsDialog) {
+        AlertDialog(
+            onDismissRequest = { onShowBatchResultsDialogChange(false) },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF4CAF50)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Check, contentDescription = null, tint = Color.White)
+                    }
+                    Text("Batch Operation Finished", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Unified processing summary of files:")
+                    Spacer(modifier = Modifier.height(4.dp))
+                    
+                    Box(modifier = Modifier.heightIn(max = 260.dp)) {
+                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(batchResults) { res ->
+                                Card(
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (res.success) MaterialTheme.colorScheme.surfaceVariant.copy(0.40f)
+                                                         else MaterialTheme.colorScheme.errorContainer.copy(0.20f)
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Text(res.originalName, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        if (res.success) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text("Saved: ${res.newName}", fontSize = 10.sp, color = MaterialTheme.colorScheme.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                        Text("Before: ${res.originalSize / 1024} KB", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                        Text("After: ${res.newSize / 1024} KB", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                                                    }
+                                                }
+                                                IconButton(
+                                                    onClick = {
+                                                        shareExportedFile(context, File(res.path))
+                                                    },
+                                                    modifier = Modifier.size(24.dp)
+                                                ) {
+                                                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                                                }
+                                            }
+                                        } else {
+                                            Text("Error: ${res.error}", fontSize = 10.sp, color = MaterialTheme.colorScheme.error)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { onShowBatchResultsDialogChange(false) }) {
+                    Text("Done")
+                }
+            }
+        )
     }
 }

@@ -27,6 +27,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -652,22 +653,25 @@ fun ColumnScope.ReorderWorkbench(
                             }
                         }
 
-                        // Drag offset states for local gesture feedback
+                        // Drag offset states for local gesture feedback in raw pixels
                         var localDragOffsetX by remember { mutableStateOf(0f) }
+                        var localDragOffsetY by remember { mutableStateOf(0f) }
                         var isDraggingThis by remember { mutableStateOf(false) }
 
                         Card(
                             colors = CardDefaults.cardColors(
                                 containerColor = if (isSelected) {
                                     MaterialTheme.colorScheme.secondaryContainer.copy(0.7f)
+                                } else if (isDraggingThis) {
+                                    MaterialTheme.colorScheme.primaryContainer.copy(0.85f)
                                 } else {
                                     MaterialTheme.colorScheme.surface
                                 }
                             ),
                             shape = RoundedCornerShape(12.dp),
                             border = androidx.compose.foundation.BorderStroke(
-                                width = if (isSelected) 2.5.dp else 1.dp,
-                                color = if (isSelected) {
+                                width = if (isSelected || isDraggingThis) 2.5.dp else 1.dp,
+                                color = if (isSelected || isDraggingThis) {
                                     MaterialTheme.colorScheme.primary
                                 } else {
                                     MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
@@ -676,6 +680,14 @@ fun ColumnScope.ReorderWorkbench(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(210.dp)
+                                .graphicsLayer {
+                                    scaleX = if (isDraggingThis) 1.06f else 1.0f
+                                    scaleY = if (isDraggingThis) 1.06f else 1.0f
+                                    translationX = localDragOffsetX
+                                    translationY = localDragOffsetY
+                                    shadowElevation = if (isDraggingThis) 12f * currentDensity else 2f * currentDensity
+                                    alpha = if (isDraggingThis) 0.9f else 1.0f
+                                }
                                 // Handle tap swap
                                 .clickable {
                                     if (selectedForSwapIndex == null) {
@@ -693,8 +705,7 @@ fun ColumnScope.ReorderWorkbench(
                                         onUpdateSwapIndex(null)
                                     }
                                 }
-                                .offset(x = localDragOffsetX.dp)
-                                // Add Drag Gesture to Page Item
+                                // Add 2D Drag-and-Drop Gesture to Page Item
                                 .pointerInput(index, extractedPageItems) {
                                     detectDragGesturesAfterLongPress(
                                         onDragStart = {
@@ -702,38 +713,75 @@ fun ColumnScope.ReorderWorkbench(
                                         },
                                         onDrag = { change, dragAmount ->
                                             change.consume()
-                                            localDragOffsetX += dragAmount.x / currentDensity
+                                            localDragOffsetX += dragAmount.x
+                                            localDragOffsetY += dragAmount.y
                                             
-                                            // Drag threshold calculation
-                                            val thresholdDp = 100f
-                                            if (localDragOffsetX > thresholdDp) {
-                                                if (index < extractedPageItems.lastIndex) {
+                                            // Grid (2 Columns) Drag threshold calculations
+                                            val thresholdWidthPx = 100f * currentDensity
+                                            val thresholdHeightPx = 130f * currentDensity
+                                            
+                                            // Horizontal Swap (Left/Right)
+                                            if (localDragOffsetX > thresholdWidthPx) {
+                                                // Dragged right -> Move later (index + 1)
+                                                if (index + 1 < extractedPageItems.size) {
                                                     val mutable = extractedPageItems.toMutableList()
                                                     val temp = mutable[index]
                                                     mutable[index] = mutable[index + 1]
                                                     mutable[index + 1] = temp
                                                     onUpdatePageItems(mutable)
                                                     localDragOffsetX = 0f
+                                                    localDragOffsetY = 0f
                                                     isDraggingThis = false
                                                 }
-                                            } else if (localDragOffsetX < -thresholdDp) {
-                                                if (index > 0) {
+                                            } else if (localDragOffsetX < -thresholdWidthPx) {
+                                                // Dragged left -> Move earlier (index - 1)
+                                                if (index - 1 >= 0) {
                                                     val mutable = extractedPageItems.toMutableList()
                                                     val temp = mutable[index]
                                                     mutable[index] = mutable[index - 1]
                                                     mutable[index - 1] = temp
                                                     onUpdatePageItems(mutable)
                                                     localDragOffsetX = 0f
+                                                    localDragOffsetY = 0f
+                                                    isDraggingThis = false
+                                                }
+                                            }
+                                            
+                                            // Vertical Swap (Up/Down)
+                                            if (localDragOffsetY > thresholdHeightPx) {
+                                                // Dragged down (moves down 1 row = index + 2)
+                                                if (index + 2 < extractedPageItems.size) {
+                                                    val mutable = extractedPageItems.toMutableList()
+                                                    val temp = mutable[index]
+                                                    mutable[index] = mutable[index + 2]
+                                                    mutable[index + 2] = temp
+                                                    onUpdatePageItems(mutable)
+                                                    localDragOffsetX = 0f
+                                                    localDragOffsetY = 0f
+                                                    isDraggingThis = false
+                                                }
+                                            } else if (localDragOffsetY < -thresholdHeightPx) {
+                                                // Dragged up (moves up 1 row = index - 2)
+                                                if (index - 2 >= 0) {
+                                                    val mutable = extractedPageItems.toMutableList()
+                                                    val temp = mutable[index]
+                                                    mutable[index] = mutable[index - 2]
+                                                    mutable[index - 2] = temp
+                                                    onUpdatePageItems(mutable)
+                                                    localDragOffsetX = 0f
+                                                    localDragOffsetY = 0f
                                                     isDraggingThis = false
                                                 }
                                             }
                                         },
                                         onDragEnd = {
                                             localDragOffsetX = 0f
+                                            localDragOffsetY = 0f
                                             isDraggingThis = false
                                         },
                                         onDragCancel = {
                                             localDragOffsetX = 0f
+                                            localDragOffsetY = 0f
                                             isDraggingThis = false
                                         }
                                     )

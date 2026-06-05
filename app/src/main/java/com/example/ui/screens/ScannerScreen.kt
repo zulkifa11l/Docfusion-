@@ -39,6 +39,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import android.webkit.PermissionRequest
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.util.Base64
+import android.webkit.JavascriptInterface
 import androidx.core.content.ContextCompat
 import com.example.ui.viewmodel.DocFusionViewModel
 import com.example.util.PdfProcessor
@@ -47,6 +54,28 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import kotlinx.coroutines.launch
+
+class MediaDevicesJavaScriptInterface(
+    private val onCaptured: (String) -> Unit,
+    private val onError: (String) -> Unit,
+    private val onLog: (String) -> Unit
+) {
+    @JavascriptInterface
+    fun onCaptured(base64Data: String) {
+        onCaptured(base64Data)
+    }
+
+    @JavascriptInterface
+    fun onError(error: String) {
+        onError(error)
+    }
+
+    @JavascriptInterface
+    fun onLog(msg: String) {
+        onLog(msg)
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,6 +89,12 @@ fun ScannerScreen(
 
     // States: "CAPTURE", "CROP", "FILTER"
     var scannerState by remember { mutableStateOf("CAPTURE") }
+
+    // Toggle for MediaDevices camera API
+    var useMediaDevicesCamera by remember { mutableStateOf(false) }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var webCameraStatusMsg by remember { mutableStateOf("Ready") }
+    val coroutineScope = rememberCoroutineScope()
 
     // Mode: "Document", "ID Card"
     var scanningCategory by remember { mutableStateOf("Document") }
@@ -110,6 +145,10 @@ fun ScannerScreen(
     val pagesList by viewModel.scanPages
 
     fun handleCapture() {
+        if (useMediaDevicesCamera) {
+            webViewRef?.evaluateJavascript("takeSnapshot()", null)
+            return
+        }
         val capture = imageCapture ?: return
         val cacheFile = File(context.cacheDir, "temp_capture_${System.currentTimeMillis()}.jpg")
         val outputOptions = ImageCapture.OutputFileOptions.Builder(cacheFile).build()
@@ -188,42 +227,270 @@ fun ScannerScreen(
                 "CAPTURE" -> {
                     if (hasCameraPermission) {
                         // 1. Camera Live View
-                        AndroidView(
-                            factory = { ctx ->
-                                PreviewView(ctx).apply {
-                                    layoutParams = ViewGroup.LayoutParams(
-                                        ViewGroup.LayoutParams.MATCH_PARENT,
-                                        ViewGroup.LayoutParams.MATCH_PARENT
-                                    )
-                                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                                }.also { previewView ->
-                                    val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-                                    cameraProviderFuture.addListener({
-                                        val cameraProvider = cameraProviderFuture.get()
-                                        val preview = Preview.Builder().build().also {
-                                            it.setSurfaceProvider(previewView.surfaceProvider)
+                        if (useMediaDevicesCamera) {
+                            AndroidView(
+                                factory = { ctx ->
+                                    WebView(ctx).apply {
+                                        layoutParams = ViewGroup.LayoutParams(
+                                            ViewGroup.LayoutParams.MATCH_PARENT,
+                                            ViewGroup.LayoutParams.MATCH_PARENT
+                                        )
+                                        settings.apply {
+                                            javaScriptEnabled = true
+                                            domStorageEnabled = true
+                                            allowFileAccess = true
+                                            mediaPlaybackRequiresUserGesture = false
+                                            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                                         }
-                                        imageCapture = ImageCapture.Builder()
-                                            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-                                            .build()
+                                        addJavascriptInterface(
+                                            MediaDevicesJavaScriptInterface(
+                                                onCaptured = { base64Data ->
+                                                    coroutineScope.launch {
+                                                        try {
+                                                            val parsedBase64 = if (base64Data.contains("base64,")) {
+                                                                base64Data.substringAfter("base64,")
+                                                            } else {
+                                                                base64Data
+                                                            }
+                                                            val decodedString = Base64.decode(parsedBase64, Base64.DEFAULT)
+                                                            val originalBmp = BitmapFactory.decodeByteArray(decodedString, 0, decodedString.size)
+                                                            if (originalBmp != null) {
+                                                                activeRawCapturedBitmap = originalBmp
+                                                                interactiveCropPoints = ScannerProcessor.detectDocumentEdges(originalBmp)
+                                                                
+                                                                if (scanningCategory == "ID Card") {
+                                                                    val croppedBmp = ScannerProcessor.applyPerspectiveCorrection(originalBmp, interactiveCropPoints)
+                                                                    activeFilteredBitmap = ScannerProcessor.applyMagicEnhance(croppedBmp)
+                                                                    scannerState = "FILTER"
+                                                                } else {
+                                                                    scannerState = "CROP"
+                                                                }
+                                                            } else {
+                                                                Toast.makeText(context, "Error decoding captured photo", Toast.LENGTH_SHORT).show()
+                                                            }
+                                                        } catch (e: Exception) {
+                                                            Toast.makeText(context, "Execution Error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                                                        }
+                                                    }
+                                                },
+                                                onError = { error ->
+                                                    coroutineScope.launch {
+                                                        Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
+                                                    }
+                                                },
+                                                onLog = { msg ->
+                                                    coroutineScope.launch {
+                                                        webCameraStatusMsg = msg
+                                                    }
+                                                }
+                                            ),
+                                            "AndroidMediaCapture"
+                                        )
+                                        webChromeClient = object : WebChromeClient() {
+                                            override fun onPermissionRequest(request: PermissionRequest) {
+                                                request.grant(request.resources)
+                                            }
+                                        }
+                                        webViewClient = object : WebViewClient() {
+                                            override fun onPageFinished(view: WebView?, url: String?) {
+                                                super.onPageFinished(view, url)
+                                            }
+                                        }
+                                        
+                                        val htmlCode = """
+                                        <!DOCTYPE html>
+                                        <html>
+                                        <head>
+                                            <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+                                            <style>
+                                                body, html {
+                                                    margin: 0; padding: 0;
+                                                    width: 100%; height: 100%;
+                                                    overflow: hidden; background-color: #000;
+                                                    font-family: system-ui, -apple-system, sans-serif;
+                                                }
+                                                #container {
+                                                    position: relative;
+                                                    width: 100%; height: 100%;
+                                                    display: flex; flex-direction: column;
+                                                    justify-content: center; align-items: center;
+                                                }
+                                                video {
+                                                    width: 100%; height: 100%;
+                                                    object-fit: cover;
+                                                }
+                                                #status-overlay {
+                                                    position: absolute;
+                                                    top: 72px;
+                                                    left: 20px; right: 20px;
+                                                    text-align: center;
+                                                    color: #fff;
+                                                    background: rgba(0,0,0,0.5);
+                                                    padding: 6px 12px;
+                                                    border-radius: 6px;
+                                                    font-size: 11px;
+                                                    pointer-events: none;
+                                                    z-index: 100;
+                                                }
+                                            </style>
+                                        </head>
+                                        <body>
+                                            <div id="container">
+                                                <div id="status-overlay">Starting MediaDevices Camera...</div>
+                                                <video id="webcam" autoplay playsinline muted></video>
+                                                <canvas id="snapshot" style="display:none;"></canvas>
+                                            </div>
+                                            <script>
+                                                const video = document.getElementById('webcam');
+                                                const canvas = document.getElementById('snapshot');
+                                                const statusOverlay = document.getElementById('status-overlay');
+                                                
+                                                let localStream = null;
+                                                let currentFacingMode = 'environment';
 
-                                        val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-                                        try {
-                                            cameraProvider.unbindAll()
-                                            cameraProvider.bindToLifecycle(
-                                                lifecycleOwner,
-                                                cameraSelector,
-                                                preview,
-                                                imageCapture
-                                            )
-                                        } catch (exc: Exception) {
-                                            exc.printStackTrace()
-                                        }
-                                    }, ContextCompat.getMainExecutor(context))
+                                                function log(msg) {
+                                                    statusOverlay.innerText = msg;
+                                                    if (window.AndroidMediaCapture) {
+                                                        AndroidMediaCapture.onLog(msg);
+                                                    }
+                                                }
+
+                                                async function initCamera() {
+                                                    try {
+                                                        if (localStream) {
+                                                            localStream.getTracks().forEach(track => track.stop());
+                                                        }
+                                                        log("MediaDevices: Requesting camera access...");
+                                                        const constraints = {
+                                                            audio: false,
+                                                            video: {
+                                                                facingMode: currentFacingMode,
+                                                                width: { ideal: 1920 },
+                                                                height: { ideal: 1080 }
+                                                            }
+                                                        };
+                                                        localStream = await navigator.mediaDevices.getUserMedia(constraints);
+                                                        video.srcObject = localStream;
+                                                        log("MediaDevices: Live Web Camera Active");
+                                                    } catch (err) {
+                                                        log("MediaDevices Error: " + err.message);
+                                                        if (window.AndroidMediaCapture) {
+                                                            AndroidMediaCapture.onError("Error: " + err.message);
+                                                        }
+                                                    }
+                                                }
+
+                                                function takeSnapshot() {
+                                                    if (!video.srcObject) {
+                                                        log("Cannot capture. No active feed.");
+                                                        return;
+                                                    }
+                                                    log("Processing frame...");
+                                                    const width = video.videoWidth || video.clientWidth;
+                                                    const height = video.videoHeight || video.clientHeight;
+                                                    canvas.width = width;
+                                                    canvas.height = height;
+                                                    const ctx = canvas.getContext('2d');
+                                                    ctx.drawImage(video, 0, 0, width, height);
+                                                    
+                                                    const base64Data = canvas.toDataURL('image/jpeg', 0.9);
+                                                    if (window.AndroidMediaCapture) {
+                                                        AndroidMediaCapture.onCaptured(base64Data);
+                                                    }
+                                                }
+
+                                                initCamera();
+                                            </script>
+                                        </body>
+                                        </html>
+                                        """.trimIndent()
+                                        loadDataWithBaseURL("https://localhost", htmlCode, "text/html", "UTF-8", null)
+                                        webViewRef = this
+                                    }
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            AndroidView(
+                                factory = { ctx ->
+                                    PreviewView(ctx).apply {
+                                        layoutParams = ViewGroup.LayoutParams(
+                                            ViewGroup.LayoutParams.MATCH_PARENT,
+                                            ViewGroup.LayoutParams.MATCH_PARENT
+                                        )
+                                        implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                                    }.also { previewView ->
+                                        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+                                        cameraProviderFuture.addListener({
+                                            val cameraProvider = cameraProviderFuture.get()
+                                            val preview = Preview.Builder().build().also {
+                                                it.setSurfaceProvider(previewView.surfaceProvider)
+                                            }
+                                            imageCapture = ImageCapture.Builder()
+                                                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                                                .build()
+
+                                            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                                            try {
+                                                cameraProvider.unbindAll()
+                                                cameraProvider.bindToLifecycle(
+                                                    lifecycleOwner,
+                                                    cameraSelector,
+                                                    preview,
+                                                    imageCapture
+                                                )
+                                            } catch (exc: Exception) {
+                                                exc.printStackTrace()
+                                            }
+                                        }, ContextCompat.getMainExecutor(context))
+                                    }
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+
+                        // Camera Selector Floating Overlay Card
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color.Black.copy(0.6f)),
+                            shape = RoundedCornerShape(24.dp),
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(16.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Button(
+                                    onClick = { useMediaDevicesCamera = false },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (!useMediaDevicesCamera) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                        contentColor = if (!useMediaDevicesCamera) MaterialTheme.colorScheme.onPrimary else Color.White
+                                    ),
+                                    shape = RoundedCornerShape(20.dp),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Default.Videocam, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Native Camera", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                                 }
-                            },
-                            modifier = Modifier.fillMaxSize()
-                        )
+
+                                Button(
+                                    onClick = { useMediaDevicesCamera = true },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (useMediaDevicesCamera) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                        contentColor = if (useMediaDevicesCamera) MaterialTheme.colorScheme.onPrimary else Color.White
+                                    ),
+                                    shape = RoundedCornerShape(20.dp),
+                                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(Icons.Default.Web, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Web MediaDevices", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
 
                         // 2. ID Card guide outline overlays
                         if (scanningCategory == "ID Card") {
